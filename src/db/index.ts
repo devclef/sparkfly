@@ -105,9 +105,49 @@ export interface Db {
 
 const now = (): string => new Date().toISOString();
 
+/** Diagnostics for the directory holding the database, for error messages. */
+function describeDataDir(dbPath: string): string {
+  const dir = path.dirname(dbPath);
+  try {
+    const st = fs.statSync(dir);
+    let writable = true;
+    try {
+      fs.accessSync(dir, fs.constants.W_OK);
+    } catch {
+      writable = false;
+    }
+    const uid = typeof process.getuid === 'function' ? process.getuid() : 'n/a';
+    const gid = typeof process.getgid === 'function' ? process.getgid() : 'n/a';
+    return [
+      `dir=${dir}`,
+      `owner=${st.uid}:${st.gid}`,
+      `mode=${(st.mode & 0o7777).toString(8)}`,
+      `process uid=${uid} gid=${gid}`,
+      `writable=${writable}`,
+    ].join(' ');
+  } catch (err) {
+    return `dir=${dir} (stat failed: ${err instanceof Error ? err.message : String(err)})`;
+  }
+}
+
 export function openDb(dbPath: string, logger?: Logger): Db {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const raw = new Database(dbPath);
+  let raw: InstanceType<typeof Database>;
+  try {
+    raw = new Database(dbPath);
+  } catch (err) {
+    if ((err as { code?: string }).code === 'SQLITE_CANTOPEN') {
+      throw new Error(
+        `cannot open database file at ${dbPath} — ${describeDataDir(dbPath)}. ` +
+          `The directory must be writable by the user the app runs as. ` +
+          `In Kubernetes this usually means the volume at the data dir is owned by root: ` +
+          `set securityContext.fsGroup to the container user's gid (999 for the sparkfly image), ` +
+          `or add an initContainer that chowns it, and check that readOnlyRootFilesystem is not blocking it.`,
+        { cause: err },
+      );
+    }
+    throw err;
+  }
   raw.pragma('journal_mode = WAL');
   raw.pragma('foreign_keys = ON');
   raw.exec(SCHEMA);
