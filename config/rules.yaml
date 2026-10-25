@@ -1,0 +1,57 @@
+# Sparkfly rules — copy this file to config/rules.yaml (or mount it in Docker)
+# and edit. Rules are evaluated in order: the first match wins unless the rule
+# sets `continue: true`.
+#
+# Field matching (all optional, all AND-ed):
+#   type:        withdrawal | deposit | transfer      (default: withdrawal)
+#   destination: "exact name"  or  /regex/flags       (also: source, description,
+#   category, budget)                                            case-insensitive
+#   currency:    EUR
+#   amount:      { min: 8, max: 25 }
+#   tags_any:    [lunch]            # match if any of these tags present
+#   tags_none:   [paid-by-else]     # match if none of these tags present
+#   weekdays:    [mon-fri]          # also [sat, sun], [monday..sunday]
+#   time:        { from: "11:00", to: "15:30" }       # local TZ, inclusive
+
+defaults:
+  # Time windows (inclusive, configured TZ) used by `meal_type: auto`.
+  meal_type_auto:
+    breakfast: "04:00-10:59"
+    lunch: "11:00-15:59"
+    snacks: "16:00-17:29"
+    dinner: "17:30-03:59"
+  # Tagging a Firefly transaction with this tag skips it entirely.
+  global_skip_tag: no-sparky
+
+rules:
+  - name: Indian Garden lunch
+    match:
+      type: withdrawal
+      destination: "Indian Garden"   # exact, case-insensitive — or /regex/i
+      # description: /.*tikka.*/i
+      # category: "Eating out"
+      # tags_any: [lunch]
+      # amount: { min: 8, max: 25 }
+      # currency: EUR
+      # weekdays: [mon-fri]
+      # time: { from: "11:00", to: "15:30" }
+    action:
+      log: meal                       # meal | food | foods
+      meal_template_id: "REPLACE_ME"  # copy the UUID of the saved meal
+      meal_type: auto                 # auto | breakfast | lunch | dinner | snacks | <custom>
+      quantity: 1
+      unit: serving
+      note: "{{description}} – {{amount}} {{currency}}"
+      # Off by default: €29 at Indian Garden probably means two people.
+      # quantity_from_amount: { per_unit: 14.50 }
+
+  - name: Coffee shop
+    match:
+      destination: /starbucks|costa/i
+    action:
+      log: food
+      food_id: "REPLACE_ME"
+      # variant_id: "REPLACE_ME"
+      quantity: 1
+      unit: serving
+      meal_type: snacks
