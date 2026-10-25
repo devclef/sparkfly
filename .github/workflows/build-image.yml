@@ -35,16 +35,28 @@ jobs:
     name: Build image
     runs-on: ubuntu-latest
     needs: test
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Build Docker image
-        run: docker build -t "sparkfly:${GITHUB_SHA}" .
+        run: |
+          docker build -t "ghcr.io/${{ github.repository }}:${GITHUB_SHA}" .
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            docker tag "ghcr.io/${{ github.repository }}:${GITHUB_SHA}" "ghcr.io/${{ github.repository }}:latest"
+          fi
 
       - name: Smoke test image
         run: |
-          docker run -d --name sparkfly -e DRY_RUN=true -p 127.0.0.1:8080:8080 "sparkfly:${GITHUB_SHA}"
+          docker run -d --name sparkfly -e DRY_RUN=true -p 127.0.0.1:8080:8080 "ghcr.io/${{ github.repository }}:${GITHUB_SHA}"
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/health; then
               echo
@@ -56,3 +68,11 @@ jobs:
           echo "health endpoint never became ready"
           docker logs sparkfly
           exit 1
+
+      - name: Push image to GHCR
+        if: github.event_name == 'push'
+        run: |
+          docker push "ghcr.io/${{ github.repository }}:${GITHUB_SHA}"
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            docker push "ghcr.io/${{ github.repository }}:latest"
+          fi
