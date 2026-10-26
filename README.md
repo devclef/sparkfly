@@ -6,7 +6,7 @@ Point a Firefly III webhook at Sparkfly, define rules ("expense account = Indian
 
 > "Lunch at Indian Garden, €14.50" in Firefly → "Chicken Tikka Masala, 1 serving, Lunch" in SparkyFitness.
 
-Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **Milestones 1–3 complete** — see [milestones](#milestones).
+Design: [docs/DESIGN.md](docs/DESIGN.md) · Latest release: **[v0.1.0](https://github.com/devclef/sparkfly/releases/tag/v0.1.0)** ([changelog](CHANGELOG.md)) · Milestones 1–3 complete — see [milestones](#milestones).
 
 ## How it works
 
@@ -41,6 +41,16 @@ Then:
 
 Prefer to try it without Firefly/Sparky? `DRY_RUN=true` starts the app and evaluates all rules without writing to SparkyFitness.
 
+### Prebuilt image
+
+Every release publishes `ghcr.io/devclef/sparkfly:<version>` (and `:<major>.<minor>`); every push to `main` publishes `:latest`. To use it instead of building locally, replace `build: .` in `docker-compose.yml` with `image: ghcr.io/devclef/sparkfly:0.1.0`.
+
+## Releasing
+
+1. Bump the version in `package.json`, `package-lock.json` and `src/constants.ts`, and add a section to `CHANGELOG.md`.
+2. Merge to `main`, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+3. The *Release* workflow checks that the tag matches the app version, runs the tests, publishes the image and creates the GitHub release from the changelog section.
+
 ## Local development
 
 Requires Node ≥ 22.
@@ -69,7 +79,7 @@ curl -s -X POST localhost:8080/hooks/firefly \
   -H 'Content-Type: application/json' -H "Signature: t=$T,v1=$V1" -d "$BODY"
 ```
 
-Tests: `npm test` (130 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes, rule editor UI, SparkyFitness lookups, dry-run event pages, webhook filters).
+Tests: `npm test` (131 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes, rule editor UI, SparkyFitness lookups, dry-run event pages, webhook filters).
 
 ## Rules
 
@@ -109,7 +119,7 @@ Firefly sends *every* transaction to Sparkfly, and most of them (rent, groceries
 - **include**: when any include filter is enabled, only transactions matching at least one are shown (e.g. budget `Food`, or category `/eating out|coffee/i`).
 - **exclude**: matching transactions are hidden (e.g. destination `Landlord`). Each dashboard row has a **hide** shortcut that pre-fills one.
 
-All fields filled in on one filter must match. Patterns use the rule syntax: exact (case-insensitive) or a `/regex/flags` literal. Filters only change what is displayed; rules still run on everything. The dashboard tabs **Shown**, **Needs a rule** and **All incl. hidden** make it obvious which food transactions still lack a rule.
+All fields filled in on one filter must match. Patterns use the rule syntax: exact (case-insensitive) or a `/regex/flags` literal. Filters only change what is displayed; rules still run on everything. The dashboard tabs **Shown**, **Needs a rule**, **Failed** and **All incl. hidden** make it obvious which food transactions still lack a rule; failed deliveries show up whether or not a filter hides them.
 
 ## Configuration (env)
 

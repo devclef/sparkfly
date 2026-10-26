@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check the tag matches the app version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          app="$(sed -n "s/^export const VERSION = '\(.*\)';$/\1/p" src/constants.ts)"
+          echo "tag=$tag package.json=$pkg constants.ts=$app"
+          if [ "$tag" != "$pkg" ] || [ "$tag" != "$app" ]; then
+            echo "::error::tag v$tag does not match package.json ($pkg) / src/constants.ts ($app)"
+            exit 1
+          fi
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+  image:
+    name: Publish image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build Docker image
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build \
+            --label "org.opencontainers.image.version=$version" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$image:$version" -t "$image:${version%.*}" .
+
+      - name: Smoke test image
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          docker run -d --name sparkfly -e DRY_RUN=true -p 127.0.0.1:8080:8080 "ghcr.io/${GITHUB_REPOSITORY,,}:$version"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health | tee /dev/stderr | grep -q "\"version\":\"$version\""; then
+              echo
+              echo "health endpoint OK, version $version"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "health endpoint never became ready (or reported the wrong version)"
+          docker logs sparkfly
+          exit 1
+
+      - name: Push image to GHCR
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker push "$image:$version"
+          docker push "$image:${version%.*}"
+
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    needs: image
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on && /^\[[^]]+\]: / { next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::no CHANGELOG.md section for $version"
+            exit 1
+          fi
+          printf '\n### Docker image\n\n```sh\ndocker pull ghcr.io/%s:%s\n```\n' "${GITHUB_REPOSITORY,,}" "$version" >> notes.md
+          cat notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --title "Sparkfly $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+          fi

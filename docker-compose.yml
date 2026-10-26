@@ -9,6 +9,8 @@
 services:
   sparkfly:
     build: .
+    # or use a published release instead of building:
+    # image: ghcr.io/devclef/sparkfly:0.1.0
     container_name: sparkfly
     ports:
       - "8080:8080"

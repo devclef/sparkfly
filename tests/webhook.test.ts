@@ -363,4 +363,24 @@ describe('status endpoints', () => {
     expect(del.statusCode).toBe(302);
     expect((await stack.app.inject({ method: 'GET', url: '/filters' })).payload).toContain('no filters yet');
   });
+
+  it('GET / surfaces failed and dead deliveries in their own view', async () => {
+    const stack = startStack();
+    const ok = stack.db.insertEvent({ uuid: 'ok-1', trigger: 'STORE_TRANSACTION', rawJson: JSON.stringify(buildPayload({ uuid: 'ok-1' })) });
+    stack.db.setEventStatus(ok.id, 'succeeded');
+    const dead = stack.db.insertEvent({
+      uuid: 'dead-1',
+      trigger: 'STORE_TRANSACTION',
+      rawJson: JSON.stringify(buildPayload({ uuid: 'dead-1' }, { transaction_journal_id: 5, description: 'Broken lunch' })),
+    });
+    stack.db.setEventStatus(dead.id, 'dead', { attempts: 3, lastError: 'sparky down' });
+
+    const html = (await stack.app.inject({ method: 'GET', url: '/' })).payload;
+    expect(html).toContain('Failed (1)');
+    expect(html).toContain(`/events/${dead.id}/retry`);
+
+    const problems = (await stack.app.inject({ method: 'GET', url: '/?view=problems' })).payload;
+    expect(problems).toContain('Broken lunch');
+    expect(problems).not.toContain(`/events/${ok.id}"`);
+  });
 });

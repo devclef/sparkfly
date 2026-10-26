@@ -122,9 +122,14 @@ describe('rule editor pages', () => {
     });
     const res = await stack.app.inject({ method: 'GET', url: `/rules/new?event=${id}` });
     expect(res.statusCode).toBe(200);
-    expect(res.payload).toContain('value="Indian Garden"');
-    expect(res.payload).toContain('value="EUR"');
+    expect(res.payload).toContain('name="destination" value="Indian Garden"');
     expect(res.payload).toContain('value="withdrawal"');
+    // Narrower fields are offered as suggestions, not pre-filled, so the
+    // rule keeps matching the place rather than this one transaction.
+    expect(res.payload).toContain('name="currency" value=""');
+    expect(res.payload).toContain('name="category" value=""');
+    expect(res.payload).toContain('data-fill="category" data-value="Eating out"');
+    expect(res.payload).toContain('data-fill="currency" data-value="EUR"');
     expect(res.payload).toContain('new rule from this transaction' === 'x' ? 'x' : 'from transaction');
 
     const missing = await stack.app.inject({ method: 'GET', url: '/rules/new?event=999' });

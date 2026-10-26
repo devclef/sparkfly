@@ -11,7 +11,7 @@ import { VERSION } from '../constants.js';
 import type { Db } from '../db/index.js';
 import { EventQueue } from '../core/queue.js';
 import type { EventProcessor } from '../core/processEvent.js';
-import { fireflyPayloadSchema } from '../firefly/types.js';
+import { fireflyPayloadSchema, type FireflySplit } from '../firefly/types.js';
 import { verifyWebhookSignature } from '../firefly/signature.js';
 import { specFromForm, specFromJson } from '../rules/form.js';
 import type { RulesRegistry } from '../rules/registry.js';
@@ -47,6 +47,26 @@ const BODY_LIMIT = 1024 * 1024;
 /** How many recent deliveries the dashboard scans, and how many rows it shows. */
 const WEBHOOK_SCAN = 500;
 const WEBHOOK_ROWS = 50;
+const isProblem = (r: { status: string }): boolean => r.status === 'failed' || r.status === 'dead';
+
+/** A split formatted for display (date in the configured TZ). */
+function txView(s: FireflySplit, tz: string): NonNullable<WebhookRow['tx']> {
+  const local = toLocalParts(new Date(s.date), tz);
+  return {
+    journal: String(s.transaction_journal_id),
+    date: `${formatDateFromParts(local)} ${formatTimeFromParts(local)}`,
+    type: s.type,
+    description: s.description ?? null,
+    amount: s.amount,
+    currency: s.currency_code,
+    source: s.source_name ?? null,
+    destination: s.destination_name ?? null,
+    budget: s.budget_name ?? null,
+    category: s.category_name ?? null,
+    tags: s.tags,
+  };
+}
+
 const startedAt = Date.now();
 
 function safeEqual(a: string, b: string): boolean {
@@ -154,7 +174,7 @@ export function buildApp(deps: AppDeps): SparkflyApp {
     const host = request.headers.host ?? `localhost:${cfg.port}`;
     const webhookUrl = `http://${host}${cfg.webhookPath}`;
     const rawView = (request.query as { view?: string }).view;
-    const view: WebhookView = rawView === 'all' || rawView === 'needs-rule' ? rawView : 'shown';
+    const view: WebhookView = rawView === 'all' || rawView === 'needs-rule' || rawView === 'problems' ? rawView : 'shown';
     const filters = loadFilters(db);
     const isVisible = visibilityPredicate(filters);
     // Look further back than we display, so filters that hide most
@@ -168,7 +188,7 @@ export function buildApp(deps: AppDeps): SparkflyApp {
         summary: e.result_summary ?? e.last_error,
         receivedAt: e.created_at,
       };
-      let splits: import('../firefly/types.js').FireflySplit[];
+      let splits: FireflySplit[];
       try {
         splits = fireflyPayloadSchema.parse(JSON.parse(e.raw_json)).content.transactions;
       } catch {
@@ -177,23 +197,10 @@ export function buildApp(deps: AppDeps): SparkflyApp {
       if (splits.length === 0) return [{ ...base, tx: null, outcome: 'n/a', rules: [], hidden: false }];
       const evaluates = e.trigger === 'STORE_TRANSACTION' || e.trigger === 'UPDATE_TRANSACTION';
       return splits.map((s) => {
-        const local = toLocalParts(new Date(s.date), cfg.tz);
         const res = evaluates ? processor.ruleOutcome(s) : null;
         return {
           ...base,
-          tx: {
-            journal: String(s.transaction_journal_id),
-            date: `${formatDateFromParts(local)} ${formatTimeFromParts(local)}`,
-            type: s.type,
-            description: s.description ?? null,
-            amount: s.amount,
-            currency: s.currency_code,
-            source: s.source_name ?? null,
-            destination: s.destination_name ?? null,
-            budget: s.budget_name ?? null,
-            category: s.category_name ?? null,
-            tags: s.tags,
-          },
+          tx: txView(s, cfg.tz),
           outcome: !res ? 'n/a' : res.skipped ? 'skip-tag' : res.rules.length > 0 ? 'matched' : 'needs-rule',
           rules: res?.rules ?? [],
           hidden: !isVisible(s),
@@ -205,9 +212,15 @@ export function buildApp(deps: AppDeps): SparkflyApp {
       shown: shownRows.length,
       hidden: allRows.length - shownRows.length,
       needsRule: shownRows.filter((r) => r.outcome === 'needs-rule').length,
+      matched: shownRows.filter((r) => r.outcome === 'matched').length,
+      // Failures matter whether or not a filter hides the transaction.
+      problems: allRows.filter(isProblem).length,
     };
     const webhooks = (
-      view === 'all' ? allRows : view === 'needs-rule' ? shownRows.filter((r) => r.outcome === 'needs-rule') : shownRows
+      view === 'all' ? allRows :
+      view === 'needs-rule' ? shownRows.filter((r) => r.outcome === 'needs-rule') :
+      view === 'problems' ? allRows.filter(isProblem) :
+      shownRows
     ).slice(0, WEBHOOK_ROWS);
     const links = db.allLinks(25).map((l) => ({
       journal_id: l.journal_id,
@@ -316,7 +329,7 @@ export function buildApp(deps: AppDeps): SparkflyApp {
   app.get('/rules/new', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!checkAuth(request, reply, cfg.adminPassword)) return;
     const q = request.query as { event?: string; split?: string };
-    let fromTransaction: { eventId: number; split: import('../firefly/types.js').FireflySplit } | null = null;
+    let fromTransaction: { eventId: number; split: FireflySplit } | null = null;
     if (q.event) {
       const eventId = Number(q.event);
       const event = Number.isInteger(eventId) ? db.getEvent(eventId) : null;
@@ -416,9 +429,11 @@ export function buildApp(deps: AppDeps): SparkflyApp {
     let plan: { trigger: string; lines: import('../core/processEvent.js').PlanLine[] };
     let hasTransactions = false;
     const journals: string[] = [];
+    let transactions: NonNullable<WebhookRow['tx']>[] = [];
     try {
       const payload = fireflyPayloadSchema.parse(JSON.parse(event.raw_json));
       hasTransactions = payload.content.transactions.length > 0;
+      transactions = payload.content.transactions.map((s) => txView(s, cfg.tz));
       for (const s of payload.content.transactions) journals.push(String(s.transaction_journal_id));
       plan = processor.plan(payload);
     } catch {
@@ -432,6 +447,7 @@ export function buildApp(deps: AppDeps): SparkflyApp {
         plan: plan.lines,
         hasTransactions,
         links,
+        transactions,
       }),
     );
   });

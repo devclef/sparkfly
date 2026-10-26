@@ -53,14 +53,14 @@ export function renderRulesList(opts: {
         <td><a href="/rules/${r.id}/edit" class="mono">${esc(r.name)}</a>${r.cont ? ' <span class="muted">+continue</span>' : ''}${!r.enabled ? ' <span class="badge warn">disabled</span>' : ''}</td>
         <td>${describeMatch(r.match)}</td>
         <td>${describeAction(r.action)}</td>
-        <td class="actions">
-          <form method="post" action="/rules/${r.id}/move" style="display:inline"><input type="hidden" name="dir" value="up"><button type="submit" class="ghost" ${i === 0 ? 'disabled' : ''} title="move up">↑</button></form>
-          <form method="post" action="/rules/${r.id}/move" style="display:inline"><input type="hidden" name="dir" value="down"><button type="submit" class="ghost" ${i === opts.rules.length - 1 ? 'disabled' : ''} title="move down">↓</button></form>
+        <td><div class="actions">
+          <form method="post" action="/rules/${r.id}/move"><input type="hidden" name="dir" value="up"><button type="submit" class="ghost" ${i === 0 ? 'disabled' : ''} title="move up" aria-label="move up">↑</button></form>
+          <form method="post" action="/rules/${r.id}/move"><input type="hidden" name="dir" value="down"><button type="submit" class="ghost" ${i === opts.rules.length - 1 ? 'disabled' : ''} title="move down" aria-label="move down">↓</button></form>
           <a class="btn ghost" href="/rules/${r.id}/edit">edit</a>
-          <form method="post" action="/rules/${r.id}/delete" style="display:inline">
+          <form method="post" action="/rules/${r.id}/delete" onsubmit="return confirm('Delete rule ${esc(r.name.replace(/['\\]/g, ''))}?')">
             <button type="submit" class="danger">delete</button>
           </form>
-        </td>
+        </div></td>
       </tr>`,
     )
     .join('\n');
@@ -73,17 +73,19 @@ export function renderRulesList(opts: {
     title: 'Rules',
     active: 'rules',
     body: `
-<h1>Rules <span class="muted">— evaluated in order, first match wins</span></h1>
+<div class="section-head">
+  <h1>Rules <small>checked top to bottom, first match wins</small></h1>
+  <a class="btn" href="/rules/new">+ new rule</a>
+</div>
 <div class="card row">
   <div><span>Source</span><span>${sourceNote}</span></div>
   <div><span>SparkyFitness search</span><span>${opts.sparkyConfigured ? '<span class="badge ok">available</span>' : '<span class="badge warn">not configured</span>'}</span></div>
-  <a class="btn" href="/rules/new">+ new rule</a>
 </div>
 ${opts.rules.length === 0 ? '<div class="infobox">No rules yet — add one here, or create one from an incoming transaction on the <a href="/">dashboard</a>.</div>' : ''}
-<div class="card" style="padding:.25rem 1.25rem">
+<div class="card table-wrap">
   <table>
     <thead><tr><th>#</th><th>Name</th><th>Match</th><th>Action</th><th></th></tr></thead>
-    <tbody>${rows || ''}</tbody>
+    <tbody>${rows || '<tr><td colspan="5" class="muted">no rules yet</td></tr>'}</tbody>
   </table>
 </div>`,
   });
@@ -123,19 +125,17 @@ function describeAction(a: ActionSpec): string {
 const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 
 /**
- * "New rule from this transaction" prefill: start the match with the split's
- * identity fields. Deliberately no amount bounds — the rule should keep
- * matching the place, not this one-off price.
+ * "New rule from this transaction" prefill: start the match with just the
+ * type and the place (destination, or the description when there is none).
+ * Pre-filling every field would make the rule match only this exact
+ * transaction; the other values are offered as one-click suggestions.
+ * Deliberately no amount bounds — the rule should keep matching the place,
+ * not this one-off price.
  */
 function matchFromSplit(split: FireflySplit): MatchSpec {
   const m: MatchSpec = { type: split.type };
   if (split.destination_name) m.destination = split.destination_name;
-  if (split.source_name) m.source = split.source_name;
-  if (split.description) m.description = split.description;
-  if (split.category_name) m.category = split.category_name;
-  if (split.budget_name) m.budget = split.budget_name;
-  if (split.currency_code) m.currency = split.currency_code;
-  if (split.tags.length > 0) m.tags_any = [...split.tags];
+  else if (split.description) m.description = split.description;
   return m;
 }
 
@@ -172,10 +172,16 @@ export function renderRuleForm(opts: {
     ? `<div class="infobox">
         Creating a rule from transaction:
         <span class="mono">${esc(describeSplitLine(opts.fromTransaction.split))}</span><br>
-        The match fields are pre-filled — choose what to log, then save. You will be taken to the
-        transaction's test page so you can verify the rule matches.
+        The type and destination are pre-filled; click a <em>use</em> suggestion under a field to narrow the match further.
+        Choose what to log, then save — you will land on the transaction's test page to check the rule matches.
        </div>`
     : '';
+  // One-click suggestions from the transaction for fields left empty.
+  const tx = opts.fromTransaction?.split;
+  const suggest = (field: string, value: string | null | undefined, current: string): string =>
+    tx && value && value !== current
+      ? `<span class="hint">this transaction: <button type="button" class="use-val" data-fill="${field}" data-value="${esc(value)}">use “${esc(value)}”</button></span>`
+      : '';
 
   return page({
     title: v ? `Edit rule ${v.name}` : 'New rule',
@@ -188,7 +194,7 @@ ${!opts.sparkyConfigured ? '<div class="warnbox">SparkyFitness is not configured
 <form method="post" action="${v ? `/rules/${v.id}` : '/rules'}">
   ${opts.fromTransaction ? `<input type="hidden" name="from_event" value="${opts.fromTransaction.eventId}">` : ''}
   <div class="grid">
-    <div class="field"><label>Rule name</label><input name="name" required value="${esc(val(v?.name))}" placeholder="Indian Garden lunch"></div>
+    <div class="field"><label for="r-name">Rule name</label><input id="r-name" name="name" required value="${esc(val(v?.name) || (tx ? tx.destination_name ?? tx.description ?? '' : ''))}" placeholder="Indian Garden lunch"></div>
     <div class="field"><label>Transaction type</label>
       <select name="type">
         <option value="" ${m.type === undefined ? 'selected' : ''}>any</option>
@@ -197,15 +203,15 @@ ${!opts.sparkyConfigured ? '<div class="warnbox">SparkyFitness is not configured
         <option value="transfer" ${m.type === 'transfer' ? 'selected' : ''}>transfer</option>
       </select>
     </div>
-    <div class="field"><label>Destination</label><input name="destination" value="${esc(pat(m.destination))}" placeholder="Indian Garden  or  /starbucks|costa/i"></div>
-    <div class="field"><label>Source</label><input name="source" value="${esc(pat(m.source))}"></div>
-    <div class="field"><label>Description</label><input name="description" value="${esc(pat(m.description))}"></div>
-    <div class="field"><label>Category</label><input name="category" value="${esc(pat(m.category))}"></div>
-    <div class="field"><label>Budget</label><input name="budget" value="${esc(pat(m.budget))}"></div>
-    <div class="field"><label>Currency</label><input name="currency" value="${esc(val(m.currency))}" placeholder="EUR"></div>
+    <div class="field"><label for="r-destination">Destination</label><input id="r-destination" name="destination" value="${esc(pat(m.destination))}" placeholder="Indian Garden  or  /starbucks|costa/i">${suggest('destination', tx?.destination_name, pat(m.destination))}</div>
+    <div class="field"><label for="r-source">Source</label><input id="r-source" name="source" value="${esc(pat(m.source))}">${suggest('source', tx?.source_name, pat(m.source))}</div>
+    <div class="field"><label for="r-description">Description</label><input id="r-description" name="description" value="${esc(pat(m.description))}">${suggest('description', tx?.description, pat(m.description))}</div>
+    <div class="field"><label for="r-category">Category</label><input id="r-category" name="category" value="${esc(pat(m.category))}">${suggest('category', tx?.category_name, pat(m.category))}</div>
+    <div class="field"><label for="r-budget">Budget</label><input id="r-budget" name="budget" value="${esc(pat(m.budget))}">${suggest('budget', tx?.budget_name, pat(m.budget))}</div>
+    <div class="field"><label for="r-currency">Currency</label><input id="r-currency" name="currency" value="${esc(val(m.currency))}" placeholder="any">${suggest('currency', tx?.currency_code, val(m.currency))}</div>
     <div class="field"><label>Amount min</label><input name="amount_min" value="${esc(val(m.amount?.min))}" inputmode="decimal"></div>
     <div class="field"><label>Amount max</label><input name="amount_max" value="${esc(val(m.amount?.max))}" inputmode="decimal"></div>
-    <div class="field"><label>Tags any</label><input name="tags_any" value="${esc((m.tags_any ?? []).join(', '))}" placeholder="lunch, dinner"></div>
+    <div class="field"><label for="r-tags_any">Tags any</label><input id="r-tags_any" name="tags_any" value="${esc((m.tags_any ?? []).join(', '))}" placeholder="lunch, dinner">${suggest('tags_any', tx?.tags.join(', '), (m.tags_any ?? []).join(', '))}</div>
     <div class="field"><label>Tags none</label><input name="tags_none" value="${esc((m.tags_none ?? []).join(', '))}" placeholder="paid-by-else"></div>
     <div class="field"><label>Weekdays</label><input name="weekdays" value="${esc((m.weekdays ?? []).join(', '))}" placeholder="mon-fri  or  sat, sun"></div>
     <div class="field"><label>Time from</label><input name="time_from" value="${esc(val(m.time?.from))}" placeholder="11:00"></div>
@@ -301,6 +307,12 @@ function foodItemRow(
 /** Shared client JS: log-type sections, foods rows, and the typeaheads. */
 function ruleFormJs(): string {
   return `
+// ---- "use" suggestions from the source transaction ----
+document.querySelectorAll('[data-fill]').forEach((b) => b.addEventListener('click', () => {
+  const el = document.getElementById('r-' + b.dataset.fill);
+  if (el) { el.value = b.dataset.value; el.focus(); }
+}));
+
 // ---- toggle action sections ----
 const logSel = document.getElementById('log');
 function toggleSections() {
@@ -428,8 +440,28 @@ export function renderEventPage(opts: {
   plan: PlanLine[];
   hasTransactions: boolean;
   links: LinkRow[];
+  /** The delivery's transactions, already formatted for display. */
+  transactions?: { journal: string; date: string; type: string; description: string | null; amount: string; currency: string; source: string | null; destination: string | null; budget: string | null; category: string | null; tags: string[] }[];
 }): string {
   const e = opts.event;
+  const dash = '<span class="muted">—</span>';
+  const txCards = (opts.transactions ?? [])
+    .map(
+      (t) => `<div class="card">
+  <div class="row">
+    <div><span>Date</span>${esc(t.date)}</div>
+    <div><span>Description</span><strong>${t.description ? esc(t.description) : dash}</strong></div>
+    <div><span>Amount</span>${esc(t.amount)} ${esc(t.currency)}</div>
+    <div><span>From → to</span>${t.source ? esc(t.source) : dash} → ${t.destination ? esc(t.destination) : dash}</div>
+    <div><span>Budget</span>${t.budget ? esc(t.budget) : dash}</div>
+    <div><span>Category</span>${t.category ? esc(t.category) : dash}</div>
+    ${t.tags.length ? `<div><span>Tags</span>${t.tags.map(esc).join(', ')}</div>` : ''}
+    <div><span>Journal</span><span class="mono">${esc(t.journal)} · ${esc(t.type)}</span></div>
+    ${opts.hasTransactions && e.trigger !== 'DESTROY_TRANSACTION' ? `<a class="btn" href="/rules/new?event=${e.id}&amp;split=${encodeURIComponent(t.journal)}">new rule from this transaction</a>` : ''}
+  </div>
+</div>`,
+    )
+    .join('\n');
   const planLines = opts.plan
     .map(
       (l) => `<div class="plan-line"><span class="badge ${
@@ -453,22 +485,24 @@ export function renderEventPage(opts: {
     active: 'dashboard',
     body: `
 <h1>Event <span class="mono">#${e.id}</span> <span class="badge ${STATUS_CLASS[e.status] ?? 'muted'}">${esc(e.status)}</span>
-  <span class="muted">${e.attempts ? `×${e.attempts} attempts` : ''} · ${esc(e.created_at.replace('T', ' ').slice(0, 19))} UTC</span></h1>
+</h1>
 <div class="card row">
   <div><span>Trigger</span><span class="mono">${esc(e.trigger)}</span></div>
+  <div><span>Received</span>${esc(e.created_at.replace('T', ' ').slice(0, 19))} UTC${e.attempts ? ` · ${e.attempts} attempt${e.attempts === 1 ? '' : 's'}` : ''}</div>
   <div><span>Result</span><span>${esc(e.result_summary ?? e.last_error ?? '—')}</span></div>
   <div class="actions">
-    <a class="btn ghost" href="/">← back</a>
-    ${opts.hasTransactions ? `<a class="btn" href="/rules/new?event=${e.id}">new rule from this transaction</a>` : ''}
-    ${e.status === 'dead' ? `<form method="post" action="/events/${e.id}/retry" style="display:inline"><button type="submit">retry (fresh budget)</button></form>` : ''}
+    <a class="btn ghost" href="/">← dashboard</a>
+    ${e.status === 'dead' ? `<form method="post" action="/events/${e.id}/retry"><button type="submit">retry (fresh budget)</button></form>` : ''}
   </div>
 </div>
+
+${txCards ? `<h2>Transaction${(opts.transactions ?? []).length === 1 ? '' : 's'}</h2>\n${txCards}` : ''}
 
 <h2>What the current rules would do (live dry run — nothing is written)</h2>
 <div class="card" style="padding:.25rem 1rem">${planLines || '<div class="plan-line muted">no splits in this delivery</div>'}</div>
 
 ${opts.links.length > 0 ? `<h2>Linked SparkyFitness entries</h2>
-<div class="card" style="padding:.25rem 1.25rem">
+<div class="card table-wrap">
   <table>
     <thead><tr><th>Journal</th><th>Rule</th><th>Kind</th><th>Entry id</th></tr></thead>
     <tbody>${linkRows}</tbody>

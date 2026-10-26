@@ -17,19 +17,21 @@ export const PAGE_CSS = `
   h1 { margin: 0 0 1rem; font-size: 1.5rem; } h1 small { color: #8b93a3; font-weight: 400; }
   h2 { margin: 2rem 0 .6rem; font-size: 1.05rem; text-transform: uppercase; letter-spacing: .06em; color: #8b93a3; }
   h3 { margin: 1.25rem 0 .5rem; font-size: .95rem; text-transform: uppercase; letter-spacing: .05em; color: #8b93a3; }
-  .nav { display: flex; gap: 1rem; align-items: baseline; margin-bottom: .5rem; }
+  .nav { display: flex; gap: .4rem 1rem; align-items: baseline; flex-wrap: wrap; margin-bottom: .75rem; }
+  .nav .spacer { flex: 1; }
   .nav a { color: #6ea8fe; text-decoration: none; font-size: .95rem; }
   .nav a.active { color: #e6e9ee; font-weight: 600; }
   .card { background: #171c24; border: 1px solid #232a36; border-radius: 10px; padding: 1rem 1.25rem; margin: .75rem 0; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
   .row { display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: center; }
   .row div span { display: block; color: #8b93a3; font-size: .8rem; }
-  code { background: #0c0f14; border: 1px solid #232a36; border-radius: 6px; padding: .15em .45em; }
+  code { background: #0c0f14; border: 1px solid #232a36; border-radius: 6px; padding: .15em .45em; overflow-wrap: anywhere; }
   a { color: #6ea8fe; }
   button, .btn { background: #2b6cb0; color: #fff; border: 0; border-radius: 6px; padding: .3em .8em; cursor: pointer; font: inherit; font-size: .85em; text-decoration: none; display: inline-block; }
   button:hover, .btn:hover { background: #3182ce; }
   button.danger { background: #7f1d1d; } button.danger:hover { background: #991b1b; }
-  button.ghost { background: #1f2733; border: 1px solid #2b3646; } button.ghost:hover { background: #263140; }
+  button.ghost, .btn.ghost { background: #1f2733; border: 1px solid #2b3646; color: #c9d1dc; } button.ghost:hover, .btn.ghost:hover { background: #263140; }
+  button:disabled { opacity: .4; cursor: default; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #232a36; vertical-align: top; }
   th { color: #8b93a3; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }
@@ -65,7 +67,29 @@ export const PAGE_CSS = `
   .nowrap { white-space: nowrap; }
   .filterbar { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; margin: .25rem 0 .5rem; }
   .filterbar a.on { color: #e6e9ee; font-weight: 600; text-decoration: none; }
-  .actions { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .actions { display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; }
+  .actions form { display: inline; margin: 0; }
+  .table-wrap { overflow-x: auto; padding: .25rem 1.25rem; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem; margin: 1rem 0; }
+  .stat { background: #171c24; border: 1px solid #232a36; border-radius: 10px; padding: .7rem 1rem; color: inherit; text-decoration: none; display: block; }
+  a.stat:hover { border-color: #2b6cb0; }
+  .stat b { display: block; font-size: 1.6rem; font-weight: 600; line-height: 1.2; }
+  .stat span { color: #8b93a3; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  .stat.warn b { color: #f6c453; } .stat.err b { color: #f28b8b; } .stat.ok b { color: #6ee7a0; }
+  details.card > summary { cursor: pointer; color: #8b93a3; font-size: .9rem; text-transform: uppercase; letter-spacing: .05em; list-style-position: inside; }
+  details.card[open] > summary { margin-bottom: .75rem; }
+  .use-val { background: none; border: 0; padding: 0; color: #6ea8fe; font-size: inherit; cursor: pointer; text-decoration: underline dotted; }
+  .use-val:hover { background: none; color: #9ec5f8; }
+  .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+  .section-head h2 { margin-bottom: .6rem; }
+  .section-head a { font-size: .9rem; }
+  @media (max-width: 640px) {
+    body { padding: 1rem 1rem 3rem; font-size: 14px; }
+    h1 { font-size: 1.3rem; } h1 small { display: block; font-size: .95rem; }
+    .card { padding: .8rem 1rem; }
+    .table-wrap { padding: .25rem .75rem; }
+    .row { gap: .9rem; }
+  }
 `;
 
 /** Full HTML document frame with the top navigation. */
@@ -80,7 +104,8 @@ export function page(opts: {
   <strong>⚡ Sparkfly</strong>
   <a href="/" class="${opts.active === 'dashboard' ? 'active' : ''}">Dashboard</a>
   <a href="/rules" class="${opts.active === 'rules' ? 'active' : ''}">Rules</a>
-  <a href="/filters" class="${opts.active === 'filters' ? 'active' : ''}">Webhook filters</a>
+  <a href="/filters" class="${opts.active === 'filters' ? 'active' : ''}">Filters</a>
+  <span class="spacer"></span>
   <span class="muted">v${esc(VERSION)}</span>
 </div>`;
   return `<!doctype html>
