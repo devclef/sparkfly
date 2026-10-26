@@ -44,17 +44,34 @@ export interface SparkyCall {
   body: Record<string, unknown>;
 }
 
-/** In-memory stand-in for the SparkyFitness API. */
-export function fakeSparky(): { calls: SparkyCall[]; failNext: number; fetchImpl: typeof fetch } {
+/**
+ * In-memory stand-in for the SparkyFitness API.
+ *
+ * `intercept` lets a test short-circuit specific calls (e.g. answer a PUT
+ * with 404) — return a Response to override the default behaviour, or
+ * undefined to fall through to the normal fake.
+ */
+export function fakeSparky(): {
+  calls: SparkyCall[];
+  failNext: number;
+  intercept: ((call: SparkyCall) => Response | undefined) | null;
+  fetchImpl: typeof fetch;
+} {
   const calls: SparkyCall[] = [];
-  let failNext = 0;
+  const state = {
+    failNext: 0,
+    intercept: null as null | ((call: SparkyCall) => Response | undefined),
+  };
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     const p = new URL(url).pathname;
     const body: Record<string, unknown> | undefined = init?.body ? JSON.parse(init.body as string) : undefined;
-    calls.push({ method: init?.method ?? 'GET', path: p, body: body ?? {} });
-    if (failNext > 0) {
-      failNext -= 1;
+    const call: SparkyCall = { method: init?.method ?? 'GET', path: p, body: body ?? {} };
+    calls.push(call);
+    const hook = state.intercept?.(call);
+    if (hook) return hook;
+    if (state.failNext > 0) {
+      state.failNext -= 1;
       return new Response('boom', { status: 500 });
     }
     return new Response(JSON.stringify({ id: String(calls.length), ...(body ?? {}) }), {
@@ -65,10 +82,16 @@ export function fakeSparky(): { calls: SparkyCall[]; failNext: number; fetchImpl
   return {
     calls,
     get failNext(): number {
-      return failNext;
+      return state.failNext;
     },
     set failNext(n: number) {
-      failNext = n;
+      state.failNext = n;
+    },
+    get intercept(): null | ((call: SparkyCall) => Response | undefined) {
+      return state.intercept;
+    },
+    set intercept(fn: null | ((call: SparkyCall) => Response | undefined)) {
+      state.intercept = fn;
     },
     fetchImpl,
   };

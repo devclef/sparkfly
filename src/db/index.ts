@@ -6,9 +6,9 @@ import type { Logger } from 'pino';
 /**
  * SQLite storage (better-sqlite3, WAL mode):
  *  - events: one row per webhook delivery (deduped on Firefly's uuid)
- *  - links:  journal_id + rule → SparkyFitness entry (needed for
- *            UPDATE/DESTROY handling in milestone 2, since
- *            food-entry-meals has no source_id of its own)
+ *  - links:  journal_id + rule → SparkyFitness entry (drives UPDATE/DESTROY
+ *            handling; food-entry-meals has no source_id of its own, so the
+ *            link is the only way back to a logged meal)
  *  - log:    the human-readable activity log behind the event rows
  */
 
@@ -95,6 +95,14 @@ export interface Db {
     eventId: number | null;
   }): void;
   linksForJournal(journalId: string): LinkRow[];
+  /** Remove one link. Returns true when a row was actually deleted. */
+  deleteLink(journalId: string, ruleId: string): boolean;
+  /** Remove every link for a journal. Returns how many rows were deleted. */
+  deleteLinksForJournal(journalId: string): number;
+  /** All links, most recently touched first (for the status page). */
+  allLinks(limit: number): LinkRow[];
+  /** Reset a dead/failed event for a fresh processing round (manual retry). */
+  resetEventForRetry(id: number): void;
   addLog(eventId: number | null, level: string, message: string): void;
   logForEvent(eventId: number): { level: string; message: string; created_at: string }[];
   recentEvents(limit: number): EventRow[];
@@ -184,6 +192,13 @@ export function openDb(dbPath: string, logger?: Logger): Db {
        event_id = excluded.event_id`,
   );
   const linksStmt = raw.prepare('SELECT * FROM links WHERE journal_id = ? ORDER BY rule_id');
+  const deleteLinkStmt = raw.prepare('DELETE FROM links WHERE journal_id = ? AND rule_id = ?');
+  const deleteLinksStmt = raw.prepare('DELETE FROM links WHERE journal_id = ?');
+  const allLinksStmt = raw.prepare('SELECT * FROM links ORDER BY created_at DESC, journal_id, rule_id LIMIT ?');
+  const resetEventStmt = raw.prepare(
+    `UPDATE events SET status = 'pending', attempts = 0, last_error = NULL,
+       result_summary = NULL, updated_at = ? WHERE id = ?`,
+  );
   const addLogStmt = raw.prepare('INSERT INTO log (event_id, level, message, created_at) VALUES (?, ?, ?, ?)');
   const logStmt = raw.prepare('SELECT level, message, created_at FROM log WHERE event_id = ? ORDER BY id DESC LIMIT 100');
   const recentEventsStmt = raw.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?');
@@ -228,6 +243,22 @@ export function openDb(dbPath: string, logger?: Logger): Db {
 
     linksForJournal(journalId) {
       return linksStmt.all(journalId) as LinkRow[];
+    },
+
+    deleteLink(journalId, ruleId) {
+      return deleteLinkStmt.run(journalId, ruleId).changes > 0;
+    },
+
+    deleteLinksForJournal(journalId) {
+      return deleteLinksStmt.run(journalId).changes;
+    },
+
+    allLinks(limit) {
+      return allLinksStmt.all(limit) as LinkRow[];
+    },
+
+    resetEventForRetry(id) {
+      resetEventStmt.run(now(), id);
     },
 
     addLog(eventId, level, message) {

@@ -18,6 +18,13 @@ export interface StatusPageData {
     summary: string | null;
     createdAt: string;
   }[];
+  links: {
+    journal_id: string;
+    rule_id: string;
+    kind: string;
+    sparky_entry_id: string | null;
+    createdAt: string;
+  }[];
   queueDepth: number;
 }
 
@@ -45,12 +52,24 @@ export function renderStatusPage(d: StatusPageData): string {
     )
     .join('\n');
 
+  const linkRows = d.links
+    .map(
+      (l) => `<tr>
+        <td class="mono">${esc(l.journal_id)}</td>
+        <td class="mono">${esc(l.rule_id)}</td>
+        <td>${esc(l.kind)}</td>
+        <td class="mono">${l.sparky_entry_id ? esc(l.sparky_entry_id) : '<span class="muted">—</span>'}</td>
+        <td class="muted">${esc(l.createdAt.replace('T', ' ').slice(0, 19))}</td>
+      </tr>`,
+    )
+    .join('\n');
+
   const eventRows = d.events
     .map(
       (e) => `<tr>
         <td class="num">${e.id}</td>
         <td class="mono">${esc(e.trigger)}</td>
-        <td><span class="badge ${STATUS_CLASS[e.status] ?? 'muted'}">${esc(e.status)}</span>${e.attempts ? ` <span class="muted">×${e.attempts}</span>` : ''}</td>
+        <td><span class="badge ${STATUS_CLASS[e.status] ?? 'muted'}">${esc(e.status)}</span>${e.attempts ? ` <span class="muted">×${e.attempts}</span>` : ''}${e.status === 'dead' ? ' <form method="post" action="/events/' + e.id + '/retry" style="display:inline"><button type="submit" title="Re-queue this event with a fresh retry budget">retry</button></form>' : ''}</td>
         <td>${esc(e.summary ?? '—')}</td>
         <td class="muted">${esc(e.createdAt.replace('T', ' ').slice(0, 19))}</td>
       </tr>`,
@@ -104,7 +123,7 @@ ${d.adminPasswordSet ? '' : '<div class="warnbox">No <code>ADMIN_PASSWORD</code>
 <div class="card">
   <div class="row">
     <div><span>Webhook URL</span><code>${esc(d.webhookUrl)}</code></div>
-    <div><span>Triggers</span><code>STORE_TRANSACTION</code> <span class="muted">(add UPDATE/DESTROY in milestone 2)</span></div>
+    <div><span>Triggers</span><code>STORE_TRANSACTION</code> <code>UPDATE_TRANSACTION</code> <code>DESTROY_TRANSACTION</code></div>
     <div><span>Response</span><code>TRANSACTIONS</code></div>
     <div><span>Deliveries</span><code>JSON</code></div>
   </div>
@@ -122,6 +141,14 @@ ${d.adminPasswordSet ? '' : '<div class="warnbox">No <code>ADMIN_PASSWORD</code>
   <table>
     <thead><tr><th>#</th><th>Name</th><th>Match</th><th>Action</th></tr></thead>
     <tbody>${ruleRows || '<tr><td colspan="4" class="muted">no rules</td></tr>'}</tbody>
+  </table>
+</div>
+
+<h2>Links — journal → SparkyFitness entry</h2>
+<div class="card" style="padding:.25rem 1.25rem">
+  <table>
+    <thead><tr><th>Journal</th><th>Rule</th><th>Kind</th><th>Entry id</th><th>Touched</th></tr></thead>
+    <tbody>${linkRows || '<tr><td colspan="5" class="muted">none yet</td></tr>'}</tbody>
   </table>
 </div>
 

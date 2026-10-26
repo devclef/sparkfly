@@ -41,6 +41,22 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
+/**
+ * Shared Basic-auth gate for the status page and the manual-retry route.
+ * Open when no ADMIN_PASSWORD is set (the operator is expected to put the
+ * port behind a reverse proxy then).
+ */
+function checkAuth(request: FastifyRequest, reply: FastifyReply, adminPassword: string | undefined): boolean {
+  if (!adminPassword) return true;
+  const auth = request.headers.authorization;
+  const expected = `Basic ${Buffer.from(`admin:${adminPassword}`).toString('base64')}`;
+  if (!auth || !safeEqual(auth, expected)) {
+    reply.code(401).header('www-authenticate', 'Basic realm="sparkfly"').send({ error: 'authentication required' });
+    return false;
+  }
+  return true;
+}
+
 export function buildApp(deps: AppDeps): SparkflyApp {
   const { cfg, db, queue, compiled, rulesLoadedFrom } = deps;
   const app = Fastify<Server, IncomingMessage, ServerResponse<IncomingMessage>, FastifyBaseLogger>({
@@ -74,14 +90,7 @@ export function buildApp(deps: AppDeps): SparkflyApp {
   }));
 
   app.get('/', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (cfg.adminPassword) {
-      const auth = request.headers.authorization;
-      const expected = `Basic ${Buffer.from(`admin:${cfg.adminPassword}`).toString('base64')}`;
-      if (!auth || !safeEqual(auth, expected)) {
-        reply.code(401).header('www-authenticate', 'Basic realm="sparkfly"').send({ error: 'authentication required' });
-        return;
-      }
-    }
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
     const host = request.headers.host ?? `localhost:${cfg.port}`;
     const webhookUrl = `http://${host}${cfg.webhookPath}`;
     const events = db.recentEvents(25).map((e) => ({
@@ -91,6 +100,13 @@ export function buildApp(deps: AppDeps): SparkflyApp {
       attempts: e.attempts,
       summary: e.result_summary ?? e.last_error,
       createdAt: e.created_at,
+    }));
+    const links = db.allLinks(25).map((l) => ({
+      journal_id: l.journal_id,
+      rule_id: l.rule_id,
+      kind: l.kind,
+      sparky_entry_id: l.sparky_entry_id,
+      createdAt: l.created_at,
     }));
     return reply
       .type('text/html; charset=utf-8')
@@ -106,6 +122,7 @@ export function buildApp(deps: AppDeps): SparkflyApp {
           webhookSecret: cfg.fireflyWebhookSecret ?? null,
           adminPasswordSet: Boolean(cfg.adminPassword),
           events,
+          links,
           queueDepth: queue.size,
         }),
       );
@@ -162,6 +179,31 @@ export function buildApp(deps: AppDeps): SparkflyApp {
       'webhook accepted',
     );
     return reply.code(202).send({ status: 'queued', event_id: id });
+  });
+
+  // ------------------------------------------------------------------ //
+  // Manual retry for dead events (the status page's retry button).
+  // A fresh retry budget (attempts = 0) and a re-queue on the in-process
+  // queue; the normal backoff machinery picks up from there.
+  // ------------------------------------------------------------------ //
+  app.post('/events/:id/retry', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid event id' });
+    }
+    const event = db.getEvent(id);
+    if (!event) return reply.code(404).send({ error: 'event not found' });
+    if (event.status !== 'dead') {
+      return reply.code(409).send({
+        error: `only "dead" events can be retried (current status: ${event.status})`,
+      });
+    }
+    db.resetEventForRetry(id);
+    db.addLog(id, 'info', 'retried manually from the status page');
+    app.log.info({ eventId: id }, 'event retried manually');
+    queue.enqueue(id);
+    return reply.redirect('/');
   });
 
   return app;

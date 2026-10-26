@@ -6,7 +6,7 @@ Point a Firefly III webhook at Sparkfly, define rules ("expense account = Indian
 
 > "Lunch at Indian Garden, €14.50" in Firefly → "Chicken Tikka Masala, 1 serving, Lunch" in SparkyFitness.
 
-Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **MVP (milestone 1) complete** — see [milestones](#milestones).
+Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **Milestones 1–2 complete** — see [milestones](#milestones).
 
 ## How it works
 
@@ -22,6 +22,7 @@ Firefly III ──POST /hooks/firefly──▶ Sparkfly ──REST──▶ Spar
 
 - **Ack fast, process async** — Firefly only retries on failure, so Sparkfly replies `202` right after the signature check and processes on an in-process queue with exponential backoff. SparkyFitness being down does not lose entries.
 - **Idempotent** — webhook redeliveries (same `uuid`) are deduped; single-food entries use SparkyFitness' `source: "firefly"` / `source_id: <journal id>` upsert key, and meal entries are guarded by the local `journal → entry` link table.
+- **Full lifecycle** — editing a Firefly transaction re-runs the rules: same rule updates the entry in place (new date/time/quantity/notes), a different rule replaces it, and deleting the transaction removes the linked entry. The `journal → entry` link table (also shown on the status page) is what makes this work for saved meals, which have no source id of their own. Events that exhaust their retry budget land in `dead` — use the **retry** button on the status page to re-queue them.
 - **Timezone-aware** — Firefly's ISO dates are converted to your `TZ` before picking `entry_date`, `entry_time`, weekday/time filters and the automatic meal type.
 
 ## Quickstart (Docker)
@@ -35,7 +36,7 @@ docker compose up -d --build
 Then:
 
 1. In Firefly III: *Administration → Configuration* → allow webhooks (admin).
-2. *Automation → Webhooks* → new: URL `http://<sparkfly-host>:8080/hooks/firefly`, trigger `STORE_TRANSACTION`, response `TRANSACTIONS`, delivery `JSON`, paste the secret shown in Firefly into your `.env` (or read it back from Sparkfly's setup page).
+2. *Automation → Webhooks* → new: URL `http://<sparkfly-host>:8080/hooks/firefly`, triggers `STORE_TRANSACTION` + `UPDATE_TRANSACTION` + `DESTROY_TRANSACTION`, response `TRANSACTIONS`, delivery `JSON`, paste the secret shown in Firefly into your `.env` (or read it back from Sparkfly's setup page).
 3. Watch it work: open `http://<sparkfly-host>:8080/` — setup details, your rules, and every webhook delivery with its outcome. `GET /health` for monitoring.
 
 Prefer to try it without Firefly/Sparky? `DRY_RUN=true` starts the app and evaluates all rules without writing to SparkyFitness.
@@ -68,7 +69,7 @@ curl -s -X POST localhost:8080/hooks/firefly \
   -H 'Content-Type: application/json' -H "Signature: t=$T,v1=$V1" -d "$BODY"
 ```
 
-Tests: `npm test` (83 cases: signature scheme, rule matching, meal-type windows, templating, retry/backoff, idempotency, webhook + status routes).
+Tests: `npm test` (104 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes).
 
 ## Rules
 
@@ -126,6 +127,6 @@ rules:
 ## Milestones
 
 - [x] **1 — MVP**: webhook endpoint, HMAC-SHA3-256 signature check, YAML rules, saved-meal + single-food (+`foods`) logging, `STORE_TRANSACTION`, SQLite event/link/activity log, Docker image, status page, dry run.
-- [ ] **2 — Lifecycle**: `UPDATE_TRANSACTION` (re-match → update / replace / delete) and `DESTROY_TRANSACTION` (delete linked entry) through the link table, plus a retry button for `dead` events. *(The triggers are recognised and logged as skipped today; links are already recorded.)*
+- [x] **2 — Lifecycle**: `UPDATE_TRANSACTION` (re-match → update / replace / delete) and `DESTROY_TRANSACTION` (delete linked entry) through the link table, plus a retry button for `dead` events on the status page. Meals are updated via `PUT` (re-created if the entry vanished on the SparkyFitness side); food entries ride the `(source, source_id)` upsert key.
 - [ ] **3 — UI**: rule editor with SparkyFitness search typeaheads, dry-run tester, full activity log.
 - [ ] **4 — Extras**: backfill from the Firefly API, webhook auto-registration, amount-based quantity in the UI, failure notifications.

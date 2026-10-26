@@ -6,6 +6,7 @@
  * Implements the endpoints Sparkfly talks to (in-memory):
  *   POST   /api/food-entries         (idempotent on source + source_id)
  *   POST   /api/food-entry-meals
+ *   PUT    /api/food-entries/:id, /api/food-entry-meals/:id
  *   DELETE /api/food-entries/:id
  *   DELETE /api/food-entry-meals/:id
  *   GET    /api/meal-types, /api/meals/search, /api/foods/search
@@ -68,6 +69,25 @@ app.post('/api/food-entry-meals', async (req) => {
   meals.set(entry.id as string, entry);
   console.log(`[mock-sparky] CREATED meal entry ${entry.id}:`, JSON.stringify(body));
   return entry;
+});
+
+app.put<{ Params: { id: string } }>('/api/food-entries/:id', async (req, reply) => {
+  for (const entry of foods.values()) {
+    if ((entry as { id?: string }).id === req.params.id) {
+      console.log(`[mock-sparky] UPDATED food entry ${req.params.id}:`, JSON.stringify(req.body));
+      return { ...(entry as object), ...(req.body as object), id: req.params.id, updated: true };
+    }
+  }
+  return reply.code(404).send({ error: 'not found' });
+});
+
+app.put<{ Params: { id: string } }>('/api/food-entry-meals/:id', async (req, reply) => {
+  const existing = meals.get(req.params.id);
+  if (!existing) return reply.code(404).send({ error: 'not found' });
+  const updated = { ...(existing as object), ...(req.body as object), id: req.params.id, updated: true };
+  meals.set(req.params.id, updated);
+  console.log(`[mock-sparky] UPDATED meal entry ${req.params.id}:`, JSON.stringify(req.body));
+  return updated;
 });
 
 app.delete<{ Params: { id: string } }>('/api/food-entries/:id', async (req, reply) => {

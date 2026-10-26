@@ -200,22 +200,25 @@ describe('processEvent: STORE_TRANSACTION', () => {
 });
 
 describe('processEvent: lifecycle triggers', () => {
-  it('skips UPDATE_TRANSACTION (milestone 2)', async () => {
+  // Full lifecycle coverage (update / replace / delete / retries) lives in
+  // tests/lifecycle.test.ts; these check the no-op edge cases.
+  it('handles UPDATE_TRANSACTION with nothing linked and no match', async () => {
     const { db, fake, processor, insert } = makeProcessor();
-    const id = await insert(buildPayload({ trigger: 'UPDATE_TRANSACTION' }));
+    const id = await insert(buildPayload({ trigger: 'UPDATE_TRANSACTION', uuid: 'l1' }, { destination_name: 'Nowhere Else' }));
     await processor.process(id);
     expect(fake.calls).toHaveLength(0);
     const event = db.getEvent(id)!;
-    expect(event.status).toBe('skipped');
-    expect(event.result_summary).toContain('milestone 2');
+    expect(event.status).toBe('succeeded');
+    expect(event.result_summary).toBe('splits=1 updated=0 created=0 deleted=0 (journal 1234 no changes)');
   });
 
-  it('skips DESTROY_TRANSACTION (milestone 2)', async () => {
+  it('handles DESTROY_TRANSACTION for a journal without links', async () => {
     const { db, fake, processor, insert } = makeProcessor();
-    const id = await insert(buildPayload({ trigger: 'DESTROY_TRANSACTION' }));
+    const id = await insert(buildPayload({ trigger: 'DESTROY_TRANSACTION', uuid: 'l2' }));
     await processor.process(id);
     expect(fake.calls).toHaveLength(0);
-    expect(db.getEvent(id)!.status).toBe('skipped');
+    expect(db.getEvent(id)!.status).toBe('succeeded');
+    expect(db.getEvent(id)!.result_summary).toBe('splits=1 deleted=0 (journal 1234 no links)');
   });
 
   it('skips unknown triggers', async () => {

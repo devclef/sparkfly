@@ -162,14 +162,77 @@ describe('POST /hooks/firefly', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it('skips lifecycle triggers with a summary (milestone 2)', async () => {
+  it('processes UPDATE_TRANSACTION end-to-end (same rule → in-place update)', async () => {
     const stack = startStack();
-    const res = await postHook(stack.app, buildPayload({ trigger: 'DESTROY_TRANSACTION' }), { secret: SECRET });
-    expect(res.statusCode).toBe(202);
+    const store = await postHook(stack.app, buildPayload({ uuid: 'u-store' }), { secret: SECRET });
+    const storeId = store.json().event_id as number;
+    await waitFor(() => stack.db.getEvent(storeId)!.status === 'succeeded', 'store to succeed');
+
+    const upd = await postHook(
+      stack.app,
+      buildPayload({ uuid: 'u-upd', trigger: 'UPDATE_TRANSACTION' }, { date: '2026-10-25T13:05:00Z', amount: '20.00' }),
+      { secret: SECRET },
+    );
+    expect(upd.statusCode).toBe(202);
+    const updId = upd.json().event_id as number;
+    await waitFor(() => stack.db.getEvent(updId)!.status === 'succeeded', 'update to succeed');
+
+    const event = stack.db.getEvent(updId)!;
+    expect(event.result_summary).toBe('splits=1 updated=1 created=0 deleted=0');
+    const put = stack.fake.calls.find((c) => c.method === 'PUT');
+    expect(put?.path).toBe('/api/food-entry-meals/1');
+    expect(put?.body).toMatchObject({ entry_time: '13:05', quantity: 1 });
+  });
+
+  it('processes DESTROY_TRANSACTION end-to-end (deletes the linked entry)', async () => {
+    const stack = startStack();
+    const store = await postHook(stack.app, buildPayload({ uuid: 'u-store' }), { secret: SECRET });
+    await waitFor(() => stack.db.getEvent(store.json().event_id as number)!.status === 'succeeded', 'store to succeed');
+    expect(stack.fake.calls).toHaveLength(1);
+
+    const del = await postHook(stack.app, buildPayload({ uuid: 'u-del', trigger: 'DESTROY_TRANSACTION' }), { secret: SECRET });
+    expect(del.statusCode).toBe(202);
+    const delId = del.json().event_id as number;
+    await waitFor(() => stack.db.getEvent(delId)!.status === 'succeeded', 'destroy to succeed');
+
+    expect(stack.db.getEvent(delId)!.result_summary).toBe('splits=1 deleted=1');
+    const delCall = stack.fake.calls.find((c) => c.method === 'DELETE');
+    expect(delCall?.path).toBe('/api/food-entry-meals/1');
+    expect(stack.db.linksForJournal('1234')).toHaveLength(0);
+  });
+
+  it('re-queues a dead event via POST /events/:id/retry', async () => {
+    const stack = startStack();
+    stack.fake.failNext = 3; // exhaust the retry budget (maxAttempts = 3)
+    const res = await postHook(stack.app, buildPayload({ uuid: 'u-dead' }), { secret: SECRET });
     const eventId = res.json().event_id as number;
-    await waitFor(() => stack.db.getEvent(eventId)!.status === 'skipped', 'event to be skipped');
-    expect(stack.db.getEvent(eventId)!.result_summary).toContain('milestone 2');
-    expect(stack.fake.calls).toHaveLength(0);
+    await waitFor(() => stack.db.getEvent(eventId)!.status === 'dead', 'event to go dead');
+
+    const retry = await stack.app.inject({ method: 'POST', url: `/events/${eventId}/retry` });
+    expect(retry.statusCode).toBe(302);
+    expect(retry.headers.location).toBe('/');
+
+    await waitFor(() => stack.db.getEvent(eventId)!.status === 'succeeded', 'event to succeed after manual retry');
+    expect(stack.db.getEvent(eventId)!.attempts).toBe(0);
+    expect(stack.fake.calls).toHaveLength(4); // 3 failed + 1 after the manual retry
+  });
+
+  it('guards the retry route with basic auth and rejects non-dead events', async () => {
+    const stack = startStack({ adminPassword: 'hunter2' });
+    const res = await postHook(stack.app, buildPayload({ uuid: 'u-auth' }), { secret: SECRET });
+    const eventId = res.json().event_id as number;
+    await waitFor(() => stack.db.getEvent(eventId)!.status === 'succeeded', 'event to succeed');
+
+    const anon = await stack.app.inject({ method: 'POST', url: `/events/${eventId}/retry` });
+    expect(anon.statusCode).toBe(401);
+
+    const creds = 'Basic ' + Buffer.from('admin:hunter2').toString('base64');
+    const notDead = await stack.app.inject({ method: 'POST', url: `/events/${eventId}/retry`, headers: { authorization: creds } });
+    expect(notDead.statusCode).toBe(409);
+    expect(notDead.json().error).toContain('only "dead" events');
+
+    const missing = await stack.app.inject({ method: 'POST', url: '/events/999/retry', headers: { authorization: creds } });
+    expect(missing.statusCode).toBe(404);
   });
 });
 

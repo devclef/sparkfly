@@ -11,7 +11,13 @@ import type { Logger } from 'pino';
  *        notes?, source, source_id }
  *    (user_id, source, source_id) is an idempotent upsert key, so resends with
  *    source "firefly" + source_id <journal id> update instead of duplicate.
+ *  - update a meal:     PUT  /api/food-entry-meals/:id (meals have no upsert
+ *    key, so date/time/quantity changes must be applied with an explicit PUT)
  *  - undo:              DELETE /api/food-entry-meals/:id | /api/food-entries/:id
+ *
+ * Food *updates* do not use PUT: re-POSTing /api/food-entries with the same
+ * (source, source_id) is the documented idempotent upsert, which also
+ * recreates the entry if it was deleted on the SparkyFitness side.
  */
 
 export class SparkyError extends Error {
@@ -49,6 +55,15 @@ export interface LogFoodRequest {
   source_id: string;
 }
 
+export interface UpdateMealRequest {
+  meal_type?: string;
+  entry_date: string;
+  entry_time?: string;
+  quantity: number;
+  unit?: string;
+  notes?: string;
+}
+
 export interface SparkyEntryRef {
   /** null when the API answered 2xx without a recognizable id. */
   id: string | null;
@@ -76,6 +91,15 @@ export class SparkyClient {
 
   logFood(body: LogFoodRequest): Promise<SparkyEntryRef> {
     return this.post('/api/food-entries', body);
+  }
+
+  /**
+   * Update an existing meal entry in place. Throws SparkyError(404) when the
+   * entry no longer exists on the SparkyFitness side — callers are expected
+   * to fall back to creating a new entry in that case.
+   */
+  async updateMeal(id: string, body: UpdateMealRequest): Promise<void> {
+    await this.request('PUT', `/api/food-entry-meals/${encodeURIComponent(id)}`, body);
   }
 
   async deleteMeal(id: string): Promise<void> {
