@@ -9,7 +9,10 @@ import type { Logger } from 'pino';
  *  - links:  journal_id + rule → SparkyFitness entry (drives UPDATE/DESTROY
  *            handling; food-entry-meals has no source_id of its own, so the
  *            link is the only way back to a logged meal)
+ *  - rules:  the rule set, managed in the web UI (the YAML file is only a
+ *            first-start import source)
  *  - log:    the human-readable activity log behind the event rows
+ *  - settings: key/value store (rule defaults, import bookkeeping)
  */
 
 export type EventStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'skipped' | 'dead';
@@ -34,6 +37,20 @@ export interface LinkRow {
   sparky_entry_id: string | null;
   event_id: number | null;
   created_at: string;
+}
+
+export interface RuleRow {
+  id: number;
+  name: string;
+  match_json: string;
+  action_json: string;
+  /** 0/1 — keep evaluating later rules after this one matches. */
+  cont: number;
+  /** 0/1 — disabled rules are skipped by the compiler. */
+  enabled: number;
+  position: number;
+  created_at: string;
+  updated_at: string;
 }
 
 const SCHEMA = `
@@ -75,9 +92,32 @@ CREATE TABLE IF NOT EXISTS log (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_log_event ON log (event_id);
+
+CREATE TABLE IF NOT EXISTS rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  match_json TEXT NOT NULL,
+  action_json TEXT NOT NULL,
+  cont INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  position INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rules_position ON rules (position);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
 
-const SCHEMA_VERSION = '1';
+/**
+ * Bumped for v2: the rules and settings tables (rules moved from the YAML
+ * file into the database, managed in the web UI). The schema is additive and
+ * idempotent, so upgrading a v1 database is just running the same DDL.
+ */
+const SCHEMA_VERSION = '2';
 
 export interface Db {
   insertEvent(evt: { uuid: string; trigger: string; rawJson: string }): { id: number; duplicate: boolean };
@@ -103,6 +143,38 @@ export interface Db {
   allLinks(limit: number): LinkRow[];
   /** Reset a dead/failed event for a fresh processing round (manual retry). */
   resetEventForRetry(id: number): void;
+  /** All rules in evaluation order. */
+  listRules(): RuleRow[];
+  getRule(id: number): RuleRow | null;
+  findRuleByName(name: string): RuleRow | null;
+  countRules(): number;
+  insertRule(rule: {
+    name: string;
+    match: unknown;
+    action: unknown;
+    cont: boolean;
+    position: number;
+    enabled?: boolean;
+  }): number;
+  updateRule(
+    id: number,
+    patch: {
+      name?: string;
+      match?: unknown;
+      action?: unknown;
+      cont?: boolean;
+      enabled?: boolean;
+      position?: number;
+    },
+  ): boolean;
+  /** Swap a rule with its neighbour. Returns false at the list edges. */
+  moveRule(id: number, dir: -1 | 1): boolean;
+  /** Delete a rule. Returns true when a row was deleted. */
+  deleteRule(id: number): boolean;
+  getSetting(key: string): string | null;
+  setSetting(key: string, value: string): void;
+  /** Run a function inside a SQLite transaction (all-or-nothing). */
+  withTransaction(fn: () => void): void;
   addLog(eventId: number | null, level: string, message: string): void;
   logForEvent(eventId: number): { level: string; message: string; created_at: string }[];
   recentEvents(limit: number): EventRow[];
@@ -199,6 +271,34 @@ export function openDb(dbPath: string, logger?: Logger): Db {
     `UPDATE events SET status = 'pending', attempts = 0, last_error = NULL,
        result_summary = NULL, updated_at = ? WHERE id = ?`,
   );
+  const listRulesStmt = raw.prepare('SELECT * FROM rules ORDER BY position, id');
+  const getRuleStmt = raw.prepare('SELECT * FROM rules WHERE id = ?');
+  const findRuleStmt = raw.prepare('SELECT * FROM rules WHERE name = ?');
+  const countRulesStmt = raw.prepare('SELECT COUNT(*) AS n FROM rules');
+  const insertRuleStmt = raw.prepare(
+    `INSERT INTO rules (name, match_json, action_json, cont, enabled, position, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const updateRuleStmt = raw.prepare(
+    `UPDATE rules SET
+       name = COALESCE(@name, name),
+       match_json = COALESCE(@match_json, match_json),
+       action_json = COALESCE(@action_json, action_json),
+       cont = COALESCE(@cont, cont),
+       enabled = COALESCE(@enabled, enabled),
+       position = COALESCE(@position, position),
+       updated_at = @updated_at
+     WHERE id = @id`,
+  );
+  const deleteRuleStmt = raw.prepare('DELETE FROM rules WHERE id = ?');
+  const setRulePositionStmt = raw.prepare(
+    'UPDATE rules SET position = @position, updated_at = @updated_at WHERE id = @id',
+  );
+  const getSettingStmt = raw.prepare('SELECT value FROM settings WHERE key = ?');
+  const setSettingStmt = raw.prepare(
+    `INSERT INTO settings (key, value) VALUES (?, ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+  );
   const addLogStmt = raw.prepare('INSERT INTO log (event_id, level, message, created_at) VALUES (?, ?, ?, ?)');
   const logStmt = raw.prepare('SELECT level, message, created_at FROM log WHERE event_id = ? ORDER BY id DESC LIMIT 100');
   const recentEventsStmt = raw.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?');
@@ -259,6 +359,87 @@ export function openDb(dbPath: string, logger?: Logger): Db {
 
     resetEventForRetry(id) {
       resetEventStmt.run(now(), id);
+    },
+
+    listRules() {
+      return listRulesStmt.all() as RuleRow[];
+    },
+
+    getRule(id) {
+      return (getRuleStmt.get(id) as RuleRow | undefined) ?? null;
+    },
+
+    findRuleByName(name) {
+      return (findRuleStmt.get(name) as RuleRow | undefined) ?? null;
+    },
+
+    countRules() {
+      return Number((countRulesStmt.get() as { n: number }).n);
+    },
+
+    insertRule({ name, match, action, cont, position, enabled = true }) {
+      const info = insertRuleStmt.run(
+        name,
+        JSON.stringify(match),
+        JSON.stringify(action),
+        cont ? 1 : 0,
+        enabled ? 1 : 0,
+        position,
+        now(),
+        now(),
+      );
+      return Number(info.lastInsertRowid);
+    },
+
+    updateRule(id, patch) {
+      const info = updateRuleStmt.run({
+        id,
+        updated_at: now(),
+        name: patch.name,
+        match_json: patch.match === undefined ? undefined : JSON.stringify(patch.match),
+        action_json: patch.action === undefined ? undefined : JSON.stringify(patch.action),
+        cont: patch.cont === undefined ? undefined : patch.cont ? 1 : 0,
+        enabled: patch.enabled === undefined ? undefined : patch.enabled ? 1 : 0,
+        position: patch.position,
+      });
+      return info.changes > 0;
+    },
+
+    moveRule(id, dir) {
+      const cur = getRuleStmt.get(id) as RuleRow | undefined;
+      if (!cur) return false;
+      const neighbor =
+        dir === -1
+          ? (raw.prepare('SELECT id, position FROM rules WHERE position < ? ORDER BY position DESC, id DESC LIMIT 1').get(cur.position) as { id: number; position: number } | undefined)
+          : (raw.prepare('SELECT id, position FROM rules WHERE position > ? ORDER BY position ASC, id ASC LIMIT 1').get(cur.position) as { id: number; position: number } | undefined);
+      if (!neighbor) return false;
+      const swap = raw.transaction(() => {
+        setRulePositionStmt.run({ id: cur.id, position: neighbor.position, updated_at: now() });
+        setRulePositionStmt.run({ id: neighbor.id, position: cur.position, updated_at: now() });
+      });
+      swap();
+      return true;
+    },
+
+    deleteRule(id) {
+      return deleteRuleStmt.run(id).changes > 0;
+    },
+
+    getSetting(key) {
+      return ((getSettingStmt.get(key) as { value: string } | undefined)?.value) ?? null;
+    },
+
+    setSetting(key, value) {
+      setSettingStmt.run(key, value);
+    },
+
+    withTransaction(fn) {
+      try {
+        raw.transaction(fn)();
+      } catch (err) {
+        // better-sqlite3 already rolled back; the table is unchanged.
+        logger?.warn({ err: (err as Error).message }, 'transaction rolled back');
+      }
     },
 
     addLog(eventId, level, message) {

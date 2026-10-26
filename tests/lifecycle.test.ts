@@ -5,9 +5,9 @@ import type { Db } from '../src/db/index.js';
 import {
   RULES_FILE,
   buildPayload,
-  compileFile,
   fakeSparky,
   makeDb,
+  makeRegistry,
   makeSparky,
   testConfig,
   type SparkyCall,
@@ -33,7 +33,7 @@ function makeEnv(
     db,
     cfg,
     sparky: opts.dryRun ? null : makeSparky(cfg, fake),
-    compiled: compileFile(opts.rules ?? RULES_FILE),
+    registry: makeRegistry(db, opts.rules ?? RULES_FILE),
     logger: { info() {}, warn() {}, error() {} } as never,
   });
   return {

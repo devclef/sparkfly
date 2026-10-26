@@ -2,7 +2,8 @@ import type { AppConfig } from '../config.js';
 import type { Db, EventStatus, LinkRow } from '../db/index.js';
 import { journalIdOf, type FireflyPayload, type FireflySplit } from '../firefly/types.js';
 import { fireflyPayloadSchema } from '../firefly/types.js';
-import type { CompiledRule, CompiledRules } from '../rules/compile.js';
+import type { CompiledRule } from '../rules/compile.js';
+import type { RulesRegistry } from '../rules/registry.js';
 import type { RulesFile } from '../rules/types.js';
 import { autoMealType, formatDateFromParts, formatTimeFromParts, toLocalParts } from '../rules/mealType.js';
 import { describeSplit, matchedRules, type SplitContext } from '../rules/match.js';
@@ -25,12 +26,21 @@ import { RetryLater } from './queue.js';
  *
  * DESTROY_TRANSACTION: delete every entry linked to the journal.
  */
+/** One line of a dry-run plan. */
+export interface PlanLine {
+  /** create | update | delete = an action would happen, none = nothing, info = explanation. */
+  kind: 'create' | 'update' | 'delete' | 'none' | 'info';
+  journal: string;
+  text: string;
+}
+
 export interface ProcessorDeps {
   db: Db;
   cfg: AppConfig;
   /** null in dry-run mode (and when SPARKY_URL/KEY are absent). */
   sparky: SparkyClient | null;
-  compiled: CompiledRules;
+  /** DB-backed rules, reloaded whenever the UI changes them. */
+  registry: RulesRegistry;
   logger: Logger;
 }
 
@@ -80,6 +90,90 @@ export class EventProcessor {
     const delay = baseDelayMs * 2 ** (attempts - 1);
     const jitter = Math.floor(Math.random() * Math.max(1, baseDelayMs / 2));
     return Math.min(delay + jitter, maxDelayMs);
+  }
+
+  // ------------------------------------------------------------------ //
+
+  /**
+   * Compute what processing this payload *would* do, without touching the
+   * database or SparkyFitness. Backs the "test against a transaction"
+   * feature so rules can be verified before or after they are saved.
+   */
+  plan(payload: FireflyPayload): { trigger: string; lines: PlanLine[] } {
+    const lines: PlanLine[] = [];
+    const defaults = this.deps.registry.compiled.defaults;
+    const describe = (rule: CompiledRule, item: number | null, ctx: SplitContext): string => {
+      const f = computeEntry(rule, item, ctx, payload, defaults);
+      return `would log ${describeAction(rule.action, f.mealType, f.quantity, f.entryDate, f.entryTime, f.omitTime)}`;
+    };
+
+    if (payload.trigger === 'STORE_TRANSACTION') {
+      for (const split of payload.content.transactions) {
+        const journalId = journalIdOf(split);
+        const ctx = this.buildContext(split);
+        const { hits, skipped } = this.matchRules(split, ctx);
+        if (skipped) {
+          lines.push({ kind: 'info', journal: journalId, text: `skipped (has the global skip tag "${defaults.global_skip_tag}")` });
+          continue;
+        }
+        if (hits.length === 0) {
+          lines.push({ kind: 'none', journal: journalId, text: `no rule matched (${describeSplit(split)})` });
+          continue;
+        }
+        for (const rule of hits) {
+          const items = rule.action.log === 'foods' ? (rule.action.foods ?? []).map((_, i) => i) : [null];
+          for (const item of items) {
+            lines.push({ kind: 'create', journal: journalId, text: `rule "${rule.name}" → ${describe(rule, item, ctx)}` });
+          }
+        }
+      }
+    } else if (payload.trigger === 'UPDATE_TRANSACTION') {
+      for (const split of payload.content.transactions) {
+        const journalId = journalIdOf(split);
+        const ctx = this.buildContext(split);
+        const initial = this.matchRules(split, ctx);
+        const hits = initial.skipped ? [] : initial.hits;
+        const skipped = initial.skipped;
+        const targets = this.ruleTargets(hits);
+        const existing = this.deps.db.linksForJournal(journalId);
+        for (const link of existing) {
+          const t = targets.get(link.rule_id);
+          if (!t) {
+            lines.push({ kind: 'delete', journal: journalId, text: `delete ${link.kind} entry ${link.sparky_entry_id ?? '?'} (rule "${link.rule_id}" no longer matches${skipped ? '; skip tag added' : ''})` });
+          } else if (link.kind !== expectedKind(t.rule)) {
+            lines.push({ kind: 'delete', journal: journalId, text: `delete ${link.kind} entry ${link.sparky_entry_id ?? '?'} (rule action type changed)` });
+          } else {
+            lines.push({ kind: 'update', journal: journalId, text: `update ${link.kind} entry ${link.sparky_entry_id ?? '?'} (rule "${t.rule.name}") → ${describe(t.rule, t.item, ctx)}` });
+          }
+        }
+        for (const t of targets.values()) {
+          if (!existing.some((l) => l.rule_id === (t.item === null ? t.rule.name : `${t.rule.name}#${t.item}`))) {
+            lines.push({ kind: 'create', journal: journalId, text: `rule "${t.rule.name}" → ${describe(t.rule, t.item, ctx)}` });
+          }
+        }
+        if (skipped && existing.length === 0) {
+          lines.push({ kind: 'info', journal: journalId, text: `skipped (has the global skip tag "${defaults.global_skip_tag}"); nothing linked` });
+        }
+        if (lines.length === 0 || !lines.some((l) => l.journal === journalId)) {
+          lines.push({ kind: 'none', journal: journalId, text: 'no changes' });
+        }
+      }
+    } else if (payload.trigger === 'DESTROY_TRANSACTION') {
+      for (const split of payload.content.transactions) {
+        const journalId = journalIdOf(split);
+        const links = this.deps.db.linksForJournal(journalId);
+        if (links.length === 0) {
+          lines.push({ kind: 'none', journal: journalId, text: 'no linked entries — nothing to delete' });
+          continue;
+        }
+        for (const link of links) {
+          lines.push({ kind: 'delete', journal: journalId, text: `delete ${link.kind} entry ${link.sparky_entry_id ?? '?'} (rule "${link.rule_id}")` });
+        }
+      }
+    } else {
+      lines.push({ kind: 'info', journal: '—', text: `unsupported trigger ${JSON.stringify(payload.trigger)}` });
+    }
+    return { trigger: payload.trigger, lines };
   }
 
   // ------------------------------------------------------------------ //
@@ -144,7 +238,7 @@ export class EventProcessor {
     const { db } = this.deps;
     const journalId = journalIdOf(split);
     const ctx = this.buildContext(split);
-    const { hits, skipped } = this.matchRules(split, ctx, eventId);
+    const { hits, skipped } = this.matchRulesAndLog(split, ctx, eventId);
     if (hits.length === 0) {
       if (!skipped) {
         db.addLog(eventId, 'info', `journal ${journalId}: no rule matched (${describeSplit(split)})`);
@@ -176,7 +270,7 @@ export class EventProcessor {
     const { db, cfg } = this.deps;
     const journalId = journalIdOf(split);
     const ctx = this.buildContext(split);
-    const { hits } = this.matchRules(split, ctx, eventId);
+    const { hits } = this.matchRulesAndLog(split, ctx, eventId);
     const targets = this.ruleTargets(hits);
     const existing = db.linksForJournal(journalId);
 
@@ -273,17 +367,25 @@ export class EventProcessor {
 
   /**
    * Evaluate the rules for a split, honouring the global skip tag.
-   * `skipped: true` means the skip tag was hit (already logged).
+   * `skipped: true` means the skip tag was hit. Pure — callers log.
    */
-  private matchRules(split: FireflySplit, ctx: SplitContext, eventId: number): { hits: CompiledRule[]; skipped: boolean } {
-    const { db, compiled } = this.deps;
-    const journalId = journalIdOf(split);
-    const skipTag = compiled.defaults.global_skip_tag.toLowerCase();
+  private matchRules(split: FireflySplit, ctx: SplitContext): { hits: CompiledRule[]; skipped: boolean } {
+    const { rules, defaults } = this.deps.registry.compiled;
+    const skipTag = defaults.global_skip_tag.toLowerCase();
     if (split.tags.some((t) => t.toLowerCase() === skipTag)) {
-      db.addLog(eventId, 'info', `journal ${journalId}: skipped (has tag "${compiled.defaults.global_skip_tag}")`);
       return { hits: [], skipped: true };
     }
-    return { hits: matchedRules(compiled.rules, ctx), skipped: false };
+    return { hits: matchedRules(rules, ctx), skipped: false };
+  }
+
+  /** matchRules + the activity-log line for the skip-tag case. */
+  private matchRulesAndLog(split: FireflySplit, ctx: SplitContext, eventId: number): { hits: CompiledRule[]; skipped: boolean } {
+    const res = this.matchRules(split, ctx);
+    if (res.skipped) {
+      const tag = this.deps.registry.compiled.defaults.global_skip_tag;
+      this.deps.db.addLog(eventId, 'info', `journal ${journalIdOf(split)}: skipped (has tag "${tag}")`);
+    }
+    return res;
   }
 
   /**
@@ -335,8 +437,8 @@ export class EventProcessor {
     journalId: string,
     eventId: number,
   ): Promise<void> {
-    const { db, cfg, compiled, sparky } = this.deps;
-    const f = computeEntry(rule, itemIndex, ctx, payload, compiled.defaults);
+    const { db, cfg, sparky } = this.deps;
+    const f = computeEntry(rule, itemIndex, ctx, payload, this.deps.registry.compiled.defaults);
 
     if (cfg.dryRun) {
       db.addLog(
@@ -406,8 +508,8 @@ export class EventProcessor {
     journalId: string,
     eventId: number,
   ): Promise<void> {
-    const { db, cfg, compiled, sparky } = this.deps;
-    const f = computeEntry(rule, itemIndex, ctx, payload, compiled.defaults);
+    const { db, cfg, sparky } = this.deps;
+    const f = computeEntry(rule, itemIndex, ctx, payload, this.deps.registry.compiled.defaults);
 
     if (cfg.dryRun) {
       db.addLog(

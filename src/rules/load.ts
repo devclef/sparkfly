@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import yaml from 'js-yaml';
-import { rulesFileSchema, type RulesFile } from './types.js';
+import { rulesFileSchema, type RuleSpec, type RulesFile } from './types.js';
 
 export interface LoadedRules {
   file: RulesFile;
@@ -13,6 +13,24 @@ export interface LoadedRules {
  * A missing file is not an error (the app runs with no rules); an invalid
  * file is, because a typo should not silently stop logging.
  */
+/**
+ * Cross-field checks that no single zod field can express. Throws with an
+ * actionable message. Used both by the YAML loader and by the rule editor,
+ * so the UI and the file cannot drift apart.
+ */
+export function validateRuleSpec(rule: RuleSpec): void {
+  const a = rule.action;
+  if (a.log === 'meal' && !a.meal_template_id) {
+    throw new Error(`rule "${rule.name}": action.log is "meal" but action.meal_template_id is missing`);
+  }
+  if (a.log === 'food' && !a.food_id) {
+    throw new Error(`rule "${rule.name}": action.log is "food" but action.food_id is missing`);
+  }
+  if (a.log === 'foods' && !a.foods?.length) {
+    throw new Error(`rule "${rule.name}": action.log is "foods" but action.foods is missing or empty`);
+  }
+}
+
 export function loadRulesFile(filePath: string): LoadedRules {
   if (!existsSync(filePath)) {
     return { file: rulesFileSchema.parse({}), loadedFrom: null };
@@ -38,16 +56,7 @@ export function loadRulesFile(filePath: string): LoadedRules {
   }
 
   for (const rule of parsed.data.rules) {
-    const a = rule.action;
-    if (a.log === 'meal' && !a.meal_template_id) {
-      throw new Error(`rule "${rule.name}": action.log is "meal" but action.meal_template_id is missing`);
-    }
-    if (a.log === 'food' && !a.food_id) {
-      throw new Error(`rule "${rule.name}": action.log is "food" but action.food_id is missing`);
-    }
-    if (a.log === 'foods' && !a.foods?.length) {
-      throw new Error(`rule "${rule.name}": action.log is "foods" but action.foods is missing or empty`);
-    }
+    validateRuleSpec(rule);
   }
   const seen = new Set<string>();
   for (const rule of parsed.data.rules) {

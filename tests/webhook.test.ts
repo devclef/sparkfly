@@ -6,9 +6,9 @@ import { buildApp } from '../src/web/server.js';
 import {
   RULES_FILE,
   buildPayload,
-  compileFile,
   fakeSparky,
   makeDb,
+  makeRegistry,
   makeSparky,
   signedHeaders,
   testConfig,
@@ -28,11 +28,12 @@ function startStack(overrides: Parameters<typeof testConfig>[0] = {}): Stack {
   const cfg = testConfig(overrides);
   const db = makeDb();
   const fake = fakeSparky();
+  const registry = makeRegistry(db, RULES_FILE);
   const processor = new EventProcessor({
     db,
     cfg,
     sparky: cfg.dryRun ? null : makeSparky(cfg, fake),
-    compiled: compileFile(RULES_FILE),
+    registry,
     logger: { info() {}, warn() {}, error() {} } as never,
   });
   const queue = new EventQueue({
@@ -40,7 +41,15 @@ function startStack(overrides: Parameters<typeof testConfig>[0] = {}): Stack {
     maxDelayMs: cfg.retry.maxDelayMs,
     process: (id) => processor.process(id),
   });
-  const app = buildApp({ cfg, db, queue, processor, compiled: compileFile(RULES_FILE), rulesLoadedFrom: '/config/rules.yaml' });
+  const app = buildApp({
+    cfg,
+    db,
+    queue,
+    processor,
+    registry,
+    sparky: cfg.dryRun ? null : makeSparky(cfg, fake),
+    importedFrom: null,
+  });
   const stack: Stack = {
     app,
     db,

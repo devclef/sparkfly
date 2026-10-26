@@ -9,11 +9,17 @@ import Fastify, {
 import type { AppConfig } from '../config.js';
 import { VERSION } from '../constants.js';
 import type { Db } from '../db/index.js';
-import type { EventQueue } from '../core/queue.js';
+import { EventQueue } from '../core/queue.js';
 import type { EventProcessor } from '../core/processEvent.js';
 import { fireflyPayloadSchema } from '../firefly/types.js';
 import { verifyWebhookSignature } from '../firefly/signature.js';
-import type { CompiledRules } from '../rules/compile.js';
+import { specFromForm, specFromJson } from '../rules/form.js';
+import type { RulesRegistry } from '../rules/registry.js';
+import { validateRuleSpec } from '../rules/load.js';
+import type { RuleSpec } from '../rules/types.js';
+import type { SparkyClient } from '../sparky/client.js';
+import { esc, page } from './layout.js';
+import { renderEventPage, renderRuleForm, renderRulesList, ruleViewFromRow } from './rulesUi.js';
 import { renderStatusPage } from './statusPage.js';
 
 export type SparkflyApp = FastifyInstance<Server, IncomingMessage, ServerResponse<IncomingMessage>, FastifyBaseLogger>;
@@ -22,9 +28,13 @@ interface AppDeps {
   cfg: AppConfig;
   db: Db;
   queue: EventQueue;
+  /** Used for the event pages' live dry-run plans. */
   processor: EventProcessor;
-  compiled: CompiledRules;
-  rulesLoadedFrom: string | null;
+  registry: RulesRegistry;
+  /** null in dry-run mode (and when SPARKY_URL/KEY are absent). */
+  sparky: SparkyClient | null;
+  /** File the rules were imported from on first start, if any. */
+  importedFrom: string | null;
 }
 
 interface RawBodyRequest {
@@ -42,9 +52,9 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 /**
- * Shared Basic-auth gate for the status page and the manual-retry route.
- * Open when no ADMIN_PASSWORD is set (the operator is expected to put the
- * port behind a reverse proxy then).
+ * Shared Basic-auth gate for the status page, the rule editor, the event
+ * pages and the /api routes. Open when no ADMIN_PASSWORD is set (the
+ * operator is expected to put the port behind a reverse proxy then).
  */
 function checkAuth(request: FastifyRequest, reply: FastifyReply, adminPassword: string | undefined): boolean {
   if (!adminPassword) return true;
@@ -57,8 +67,47 @@ function checkAuth(request: FastifyRequest, reply: FastifyReply, adminPassword: 
   return true;
 }
 
+/**
+ * Persist a rule spec after validation. Returns a Fastify error response or
+ * null on success (the registry is reloaded in either successful case).
+ */
+function saveRule(
+  deps: AppDeps,
+  reply: FastifyReply,
+  spec: RuleSpec,
+  id: number | null,
+): FastifyReply | null {
+  const { db, registry } = deps;
+  const existing = id === null ? db.findRuleByName(spec.name) : db.getRule(id);
+  if (existing && existing.id !== id) {
+    return reply.code(409).send({ error: `a rule named "${spec.name}" already exists (id ${existing.id})` });
+  }
+  const patch = { name: spec.name, match: spec.match, action: spec.action, cont: spec['continue'] };
+  if (id === null) {
+    const rows = db.listRules();
+    const position = rows.length === 0 ? 1 : (rows.at(-1)?.position ?? 0) + 1;
+    db.insertRule({ ...patch, position });
+  } else {
+    db.updateRule(id, patch);
+  }
+  registry.reload();
+  return null;
+}
+
+/** Normalise a SparkyFitness lookup response into an array for the typeaheads. */
+function asList(v: unknown): unknown[] {
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === 'object') {
+    for (const key of ['data', 'items', 'results', 'meals', 'foods']) {
+      const inner = (v as Record<string, unknown>)[key];
+      if (Array.isArray(inner)) return inner;
+    }
+  }
+  return [];
+}
+
 export function buildApp(deps: AppDeps): SparkflyApp {
-  const { cfg, db, queue, compiled, rulesLoadedFrom } = deps;
+  const { cfg, db, queue, processor, registry, sparky } = deps;
   const app = Fastify<Server, IncomingMessage, ServerResponse<IncomingMessage>, FastifyBaseLogger>({
     logger: { level: cfg.logLevel },
     bodyLimit: BODY_LIMIT,
@@ -79,13 +128,19 @@ export function buildApp(deps: AppDeps): SparkflyApp {
     }
   });
 
+  // The rule editor submits classic HTML forms. Fastify has no default
+  // parser for this content type, so add one.
+  app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'buffer', bodyLimit: BODY_LIMIT }, (req, buf, done) => {
+    done(null, Object.fromEntries(new URLSearchParams(buf.toString('utf8')).entries()));
+  });
+
   app.get('/health', async () => ({
     ok: true,
     app: 'sparkfly',
     version: VERSION,
     uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
     dry_run: cfg.dryRun,
-    rules: compiled.rules.length,
+    rules: registry.compiled.rules.length,
     queue_depth: queue.size,
   }));
 
@@ -116,8 +171,10 @@ export function buildApp(deps: AppDeps): SparkflyApp {
           dryRun: cfg.dryRun,
           sparkyUrl: cfg.sparkyUrl,
           tz: cfg.tz,
-          rulesLoadedFrom,
-          rules: compiled.rules,
+          rulesSource: registry.importedFrom
+            ? `imported from ${registry.importedFrom}`
+            : 'managed in the UI',
+          rules: registry.compiled.rules,
           webhookUrl,
           webhookSecret: cfg.fireflyWebhookSecret ?? null,
           adminPasswordSet: Boolean(cfg.adminPassword),
@@ -127,6 +184,208 @@ export function buildApp(deps: AppDeps): SparkflyApp {
         }),
       );
   });
+
+  // ------------------------------------------------------------------ //
+  // Rule management (UI forms)
+  // ------------------------------------------------------------------ //
+  app.get('/rules', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const rules = db.listRules().map(ruleViewFromRow);
+    return reply.type('text/html; charset=utf-8').send(
+      renderRulesList({
+        rules,
+        sparkyConfigured: sparky !== null,
+        importedFrom: registry.importedFrom,
+        rulesSourceFile: cfg.rulesFile,
+      }),
+    );
+  });
+
+  app.get('/rules/new', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const q = request.query as { event?: string; split?: string };
+    let fromTransaction: { eventId: number; split: import('../firefly/types.js').FireflySplit } | null = null;
+    if (q.event) {
+      const eventId = Number(q.event);
+      const event = Number.isInteger(eventId) ? db.getEvent(eventId) : null;
+      if (event) {
+        try {
+          const payload = fireflyPayloadSchema.parse(JSON.parse(event.raw_json));
+          const splits = payload.content.transactions;
+          const split = q.split ? splits.find((s) => String(s.transaction_journal_id) === q.split) : splits[0];
+          if (split) fromTransaction = { eventId, split };
+        } catch {
+          fromTransaction = null;
+        }
+      }
+      if (!fromTransaction) return reply.code(404).send('event not found or has no transactions');
+    }
+    return reply.type('text/html; charset=utf-8').send(
+      renderRuleForm({
+        view: null,
+        errors: [],
+        fromTransaction,
+        sparkyConfigured: sparky !== null,
+      }),
+    );
+  });
+
+  const saveFromForm = async (request: FastifyRequest, reply: FastifyReply, id: number | null) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const body = (request.body ?? {}) as Record<string, string | undefined>;
+    const res = specFromForm(body);
+    if (!res.ok) {
+      // Re-render the form with the submitted values and the errors.
+      const view = id === null ? null : (() => {
+        const row = db.getRule(id);
+        return row ? ruleViewFromRow(row) : null;
+      })();
+      return reply
+        .code(422)
+        .type('text/html; charset=utf-8')
+        .send(renderRuleForm({ view, errors: res.errors, fromTransaction: null, sparkyConfigured: sparky !== null }));
+    }
+    const saved = saveRule(deps, reply, res.spec, id);
+    if (saved) return saved;
+    app.log.info({ rule: res.spec.name, id: id ?? db.findRuleByName(res.spec.name)?.id }, 'rule saved via UI');
+    const fromEvent = body.from_event ? Number(body.from_event) : null;
+    if (id === null && fromEvent && Number.isInteger(fromEvent) && db.getEvent(fromEvent)) {
+      // Created from a transaction: take the user straight to its test page.
+      return reply.redirect(`/events/${fromEvent}`);
+    }
+    return reply.redirect('/rules');
+  };
+
+  app.post('/rules', (request, reply) => saveFromForm(request, reply, null));
+  app.post('/rules/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    const id = Number((request.params as { id: string }).id);
+    if (!Number.isInteger(id) || !db.getRule(id)) return reply.code(404).send({ error: 'rule not found' });
+    return saveFromForm(request, reply, id);
+  });
+
+  app.get('/rules/:id/edit', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    const row = Number.isInteger(id) ? db.getRule(id) : null;
+    if (!row) return reply.code(404).type('text/html; charset=utf-8').send('<h1>rule not found</h1>');
+    return reply.type('text/html; charset=utf-8').send(
+      renderRuleForm({ view: ruleViewFromRow(row), errors: [], fromTransaction: null, sparkyConfigured: sparky !== null }),
+    );
+  });
+
+  app.post('/rules/:id/delete', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    if (!Number.isInteger(id) || !db.getRule(id)) return reply.code(404).send({ error: 'rule not found' });
+    db.deleteRule(id);
+    registry.reload();
+    app.log.info({ id }, 'rule deleted via UI');
+    return reply.redirect('/rules');
+  });
+
+  app.post('/rules/:id/move', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    if (!Number.isInteger(id) || !db.getRule(id)) return reply.code(404).send({ error: 'rule not found' });
+    const body = (request.body ?? {}) as { dir?: string };
+    const dir: -1 | 1 = body.dir === 'up' ? -1 : 1;
+    if (db.moveRule(id, dir)) registry.reload();
+    return reply.redirect('/rules');
+  });
+
+  // ------------------------------------------------------------------ //
+  // Event pages: dry-run tester + activity log
+  // ------------------------------------------------------------------ //
+  app.get('/events/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    const event = Number.isInteger(id) ? db.getEvent(id) : null;
+    if (!event) return reply.code(404).type('text/html; charset=utf-8').send('<h1>event not found</h1>');
+    let plan: { trigger: string; lines: import('../core/processEvent.js').PlanLine[] };
+    let hasTransactions = false;
+    const journals: string[] = [];
+    try {
+      const payload = fireflyPayloadSchema.parse(JSON.parse(event.raw_json));
+      hasTransactions = payload.content.transactions.length > 0;
+      for (const s of payload.content.transactions) journals.push(String(s.transaction_journal_id));
+      plan = processor.plan(payload);
+    } catch {
+      plan = { trigger: event.trigger, lines: [{ kind: 'info', journal: '—', text: 'payload no longer parses' }] };
+    }
+    const links = journals.flatMap((j) => db.linksForJournal(j));
+    return reply.type('text/html; charset=utf-8').send(
+      renderEventPage({
+        event,
+        log: db.logForEvent(event.id),
+        plan: plan.lines,
+        hasTransactions,
+        links,
+      }),
+    );
+  });
+
+  // ------------------------------------------------------------------ //
+  // Programmatic rule API (JSON) — same validation as the UI
+  // ------------------------------------------------------------------ //
+  app.get('/api/rules', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    return db.listRules().map(ruleViewFromRow);
+  });
+
+  app.post('/api/rules', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const res = specFromJson(request.body);
+    if (!res.ok) return reply.code(400).send({ error: 'invalid rule', details: res.errors });
+    const saved = saveRule(deps, reply, res.spec, null);
+    if (saved) return saved;
+    return reply.code(201).send({ id: db.findRuleByName(res.spec.name)?.id, name: res.spec.name });
+  });
+
+  app.put('/api/rules/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    if (!Number.isInteger(id) || !db.getRule(id)) return reply.code(404).send({ error: 'rule not found' });
+    const res = specFromJson(request.body);
+    if (!res.ok) return reply.code(400).send({ error: 'invalid rule', details: res.errors });
+    const saved = saveRule(deps, reply, res.spec, id);
+    if (saved) return saved;
+    return reply.send({ id, name: res.spec.name });
+  });
+
+  app.delete('/api/rules/:id', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    if (!Number.isInteger(id) || !db.getRule(id)) return reply.code(404).send({ error: 'rule not found' });
+    db.deleteRule(id);
+    registry.reload();
+    return reply.code(204).send();
+  });
+
+  // ------------------------------------------------------------------ //
+  // SparkyFitness lookups for the rule editor's typeaheads
+  // ------------------------------------------------------------------ //
+  const sparkyLookup = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    if (!sparky) {
+      return reply.code(503).send({ error: 'SparkyFitness is not configured (SPARKY_URL / SPARKY_API_KEY, and DRY_RUN off)' });
+    }
+    const q = ((request.query as { q?: string }).q ?? '').trim();
+    try {
+      const kind = (request.params as { kind: string }).kind;
+      if (kind !== 'meal-types' && kind !== 'meals' && kind !== 'foods') {
+        return reply.code(400).send({ error: 'unknown lookup kind' });
+      }
+      const result =
+        kind === 'meal-types' ? await sparky.mealTypes() :
+        kind === 'meals' ? (q ? await sparky.searchMeals(q) : await sparky.listMeals()) :
+        await sparky.searchFoods(q);
+      return asList(result);
+    } catch (err) {
+      app.log.warn({ err: (err as Error).message }, 'sparky lookup failed');
+      return reply.code(502).send({ error: `SparkyFitness lookup failed: ${(err as Error).message}` });
+    }
+  };
+  app.get('/api/sparky/:kind', sparkyLookup);
 
   // ------------------------------------------------------------------ //
   // Firefly webhook: verify → store → 202. Processing happens on the
@@ -151,26 +410,24 @@ export function buildApp(deps: AppDeps): SparkflyApp {
       ttlSeconds: cfg.signatureTtlSeconds,
     });
     if (!verification.ok) {
-      app.log.warn({ reason: verification.reason }, 'webhook rejected: signature verification failed');
-      return reply.code(401).send({ error: 'signature verification failed', reason: verification.reason });
+      app.log.warn({ reason: verification.reason }, 'rejecting webhook: bad signature');
+      return reply.code(401).send({ error: 'invalid signature', reason: verification.reason });
     }
 
-    const body = request.body;
-    const parsed = fireflyPayloadSchema.safeParse(body);
+    const parsed = fireflyPayloadSchema.safeParse(request.body);
     if (!parsed.success) {
-      const details = parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`);
-      app.log.warn({ details }, 'webhook rejected: payload validation failed');
-      return reply.code(400).send({ error: 'invalid payload', details });
+      app.log.warn({ issues: parsed.error.issues }, 'rejecting webhook: invalid payload');
+      return reply.code(400).send({ error: 'invalid payload' });
     }
 
-    const rawJson = rawBody.toString('utf8');
     const { id, duplicate } = db.insertEvent({
       uuid: parsed.data.uuid,
       trigger: parsed.data.trigger,
-      rawJson,
+      rawJson: rawBody.toString('utf8'),
     });
     if (duplicate) {
-      app.log.info({ eventId: id, uuid: parsed.data.uuid }, 'duplicate webhook delivery (same uuid); not re-queueing');
+      db.addLog(id, 'info', `duplicate delivery of uuid ${parsed.data.uuid} ignored`);
+      app.log.info({ eventId: id, uuid: parsed.data.uuid }, 'duplicate webhook ignored');
       return reply.code(202).send({ status: 'duplicate', event_id: id });
     }
     queue.enqueue(id);

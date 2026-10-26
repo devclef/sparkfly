@@ -1,11 +1,13 @@
 import { summarizeAction, summarizeMatch, type CompiledRule } from '../rules/compile.js';
+import { esc, page } from './layout.js';
 
 export interface StatusPageData {
   version: string;
   dryRun: boolean;
   sparkyUrl: string;
   tz: string;
-  rulesLoadedFrom: string | null;
+  /** e.g. "managed in the UI" or "imported from /config/rules.yaml". */
+  rulesSource: string;
   rules: CompiledRule[];
   webhookUrl: string;
   webhookSecret: string | null;
@@ -27,9 +29,6 @@ export interface StatusPageData {
   }[];
   queueDepth: number;
 }
-
-const esc = (s: string): string =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 const STATUS_CLASS: Record<string, string> = {
   succeeded: 'ok',
@@ -69,9 +68,14 @@ export function renderStatusPage(d: StatusPageData): string {
       (e) => `<tr>
         <td class="num">${e.id}</td>
         <td class="mono">${esc(e.trigger)}</td>
-        <td><span class="badge ${STATUS_CLASS[e.status] ?? 'muted'}">${esc(e.status)}</span>${e.attempts ? ` <span class="muted">×${e.attempts}</span>` : ''}${e.status === 'dead' ? ' <form method="post" action="/events/' + e.id + '/retry" style="display:inline"><button type="submit" title="Re-queue this event with a fresh retry budget">retry</button></form>' : ''}</td>
+        <td><span class="badge ${STATUS_CLASS[e.status] ?? 'muted'}">${esc(e.status)}</span>${e.attempts ? ` <span class="muted">×${e.attempts}</span>` : ''}</td>
         <td>${esc(e.summary ?? '—')}</td>
         <td class="muted">${esc(e.createdAt.replace('T', ' ').slice(0, 19))}</td>
+        <td class="actions">
+          <a class="btn ghost" href="/events/${e.id}">activity</a>
+          ${e.trigger === 'STORE_TRANSACTION' || e.trigger === 'UPDATE_TRANSACTION' ? `<a class="btn ghost" href="/rules/new?event=${e.id}">rule</a>` : ''}
+          ${e.status === 'dead' ? `<form method="post" action="/events/${e.id}/retry" style="display:inline"><button type="submit" title="Re-queue this event with a fresh retry budget">retry</button></form>` : ''}
+        </td>
       </tr>`,
     )
     .join('\n');
@@ -80,38 +84,8 @@ export function renderStatusPage(d: StatusPageData): string {
     ? '<span class="badge warn">dry run</span>'
     : `<span class="badge ok">writing to ${esc(d.sparkyUrl)}</span>`;
 
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Sparkfly</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root { color-scheme: dark; }
-  body { font: 15px/1.5 system-ui, -apple-system, sans-serif; margin: 0 auto; max-width: 1080px; padding: 2rem 1.25rem 4rem; background: #101318; color: #e6e9ee; }
-  h1 { margin: 0; font-size: 1.6rem; } h1 small { color: #8b93a3; font-weight: 400; }
-  h2 { margin: 2.25rem 0 .75rem; font-size: 1.1rem; text-transform: uppercase; letter-spacing: .06em; color: #8b93a3; }
-  .card { background: #171c24; border: 1px solid #232a36; border-radius: 10px; padding: 1rem 1.25rem; margin: .75rem 0; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
-  .row { display: flex; gap: 1.5rem; flex-wrap: wrap; align-items: center; }
-  .row div span { display: block; color: #8b93a3; font-size: .8rem; }
-  code { background: #0c0f14; border: 1px solid #232a36; border-radius: 6px; padding: .15em .45em; }
-  button { background: #2b6cb0; color: #fff; border: 0; border-radius: 6px; padding: .3em .8em; cursor: pointer; font: inherit; font-size: .85em; }
-  button:hover { background: #3182ce; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #232a36; vertical-align: top; }
-  th { color: #8b93a3; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }
-  .num { color: #8b93a3; }
-  .badge { display: inline-block; border-radius: 999px; padding: .05em .7em; font-size: .8rem; }
-  .badge.ok { background: #1c3527; color: #6ee7a0; }
-  .badge.warn { background: #3a2f14; color: #f6c453; }
-  .badge.err { background: #3a1a1c; color: #f28b8b; }
-  .muted { color: #8b93a3; }
-  .warnbox { background: #3a2f14; border: 1px solid #6b5416; color: #f6c453; border-radius: 10px; padding: .6rem 1rem; margin: .75rem 0; }
-</style>
-</head>
-<body>
-<h1>⚡ Sparkfly <small>v${esc(d.version)} · Firefly III → SparkyFitness</small></h1>
+  const body = `
+<h1>Dashboard <small>Firefly III → SparkyFitness</small></h1>
 <div class="row">
   ${dryRunBadge}
   <span class="muted">TZ ${esc(d.tz)}</span>
@@ -136,11 +110,14 @@ ${d.adminPasswordSet ? '' : '<div class="warnbox">No <code>ADMIN_PASSWORD</code>
   </div>
 </div>
 
-<h2>Rules ${d.rulesLoadedFrom ? `<span class="muted mono">(${esc(d.rulesLoadedFrom)})</span>` : '<span class="muted">— no rules file found, nothing will be logged</span>'}</h2>
+<h2>Rules <a href="/rules" style="float:right;text-transform:none;letter-spacing:0">manage in the UI →</a></h2>
+<div class="card row" style="padding:.6rem 1.25rem">
+  <div><span>Source</span><span>${esc(d.rulesSource)}</span></div>
+</div>
 <div class="card" style="padding:.25rem 1.25rem">
   <table>
     <thead><tr><th>#</th><th>Name</th><th>Match</th><th>Action</th></tr></thead>
-    <tbody>${ruleRows || '<tr><td colspan="4" class="muted">no rules</td></tr>'}</tbody>
+    <tbody>${ruleRows || '<tr><td colspan="4" class="muted">no rules — <a href="/rules/new">add one</a> or create one from an incoming transaction</td></tr>'}</tbody>
   </table>
 </div>
 
@@ -155,11 +132,15 @@ ${d.adminPasswordSet ? '' : '<div class="warnbox">No <code>ADMIN_PASSWORD</code>
 <h2>Recent webhooks</h2>
 <div class="card" style="padding:.25rem 1.25rem">
   <table>
-    <thead><tr><th>#</th><th>Trigger</th><th>Status</th><th>Summary</th><th>Received</th></tr></thead>
-    <tbody>${eventRows || '<tr><td colspan="5" class="muted">none yet — point the webhook at the URL above</td></tr>'}</tbody>
+    <thead><tr><th>#</th><th>Trigger</th><th>Status</th><th>Summary</th><th>Received</th><th></th></tr></thead>
+    <tbody>${eventRows || '<tr><td colspan="6" class="muted">none yet — point the webhook at the URL above</td></tr>'}</tbody>
   </table>
-</div>
-${d.webhookSecret ? `<script>window.sparkflySecret=${JSON.stringify(d.webhookSecret)};</script>` : ''}
-</body>
-</html>`;
+</div>`;
+
+  return page({
+    title: 'Sparkfly',
+    active: 'dashboard',
+    body,
+    scripts: d.webhookSecret ? `window.sparkflySecret=${JSON.stringify(d.webhookSecret)};` : undefined,
+  });
 }

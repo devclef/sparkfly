@@ -4,9 +4,9 @@ import { RetryLater } from '../src/core/queue.js';
 import {
   RULES_FILE,
   buildPayload,
-  compileFile,
   fakeSparky,
   makeDb,
+  makeRegistry,
   makeSparky,
   testConfig,
 } from './helpers.js';
@@ -29,7 +29,7 @@ function makeProcessor(opts: { dryRun?: boolean; failNext?: number; maxAttempts?
     db,
     cfg,
     sparky: opts.dryRun ? null : makeSparky(cfg, fake),
-    compiled: compileFile(RULES_FILE),
+    registry: makeRegistry(db, RULES_FILE),
     logger: { info() {}, warn() {}, error() {} } as never,
   });
   return { db, fake, cfg, processor, insert: (p: unknown) => insertEvent(db, p) };
@@ -160,21 +160,20 @@ describe('processEvent: STORE_TRANSACTION', () => {
 
   it('scales quantity with quantity_from_amount', async () => {
     const base = makeProcessor();
-    const rules = compileFile({
-      ...RULES_FILE,
-      rules: [
-        {
-          name: 'Big order',
-          match: { destination: 'Indian Garden' },
-          action: { log: 'food', food_id: 'f', quantity: 1, meal_type: 'lunch', quantity_from_amount: { per_unit: 14.5 } },
-        },
-      ],
-    });
     const proc = new EventProcessor({
       db: base.db,
       cfg: base.cfg,
       sparky: makeSparky(base.cfg, base.fake),
-      compiled: rules,
+      registry: makeRegistry(base.db, {
+        ...RULES_FILE,
+        rules: [
+          {
+            name: 'Big order',
+            match: { destination: 'Indian Garden' },
+            action: { log: 'food', food_id: 'f', quantity: 1, meal_type: 'lunch', quantity_from_amount: { per_unit: 14.5 } },
+          },
+        ],
+      }),
       logger: { info() {}, warn() {}, error() {} } as never,
     });
     const id = await base.insert(buildPayload({}, { amount: '29.00' }));
@@ -184,14 +183,19 @@ describe('processEvent: STORE_TRANSACTION', () => {
 
   it('continues to later rules when continue: true', async () => {
     const { db, fake, cfg, insert } = makeProcessor();
-    const rules = compileFile({
-      ...RULES_FILE,
-      rules: [
-        { name: 'A', continue: true, match: { destination: '/garden/i' }, action: { log: 'food', food_id: 'fa', meal_type: 'lunch' } },
-        { name: 'B', match: { destination: 'Indian Garden' }, action: { log: 'meal', meal_template_id: 'mb', meal_type: 'lunch' } },
-      ],
+    const proc = new EventProcessor({
+      db,
+      cfg,
+      sparky: makeSparky(cfg, fake),
+      registry: makeRegistry(db, {
+        ...RULES_FILE,
+        rules: [
+          { name: 'A', continue: true, match: { destination: '/garden/i' }, action: { log: 'food', food_id: 'fa', meal_type: 'lunch' } },
+          { name: 'B', match: { destination: 'Indian Garden' }, action: { log: 'meal', meal_template_id: 'mb', meal_type: 'lunch' } },
+        ],
+      }),
+      logger: { info() {}, warn() {}, error() {} } as never,
     });
-    const proc = new EventProcessor({ db, cfg, sparky: makeSparky(cfg, fake), compiled: rules, logger: { info() {}, warn() {}, error() {} } as never });
     const id = await insert(buildPayload());
     await proc.process(id);
     expect(fake.calls.map((c) => c.path).sort()).toEqual(['/api/food-entries', '/api/food-entry-meals']);

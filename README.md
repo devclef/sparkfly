@@ -6,7 +6,7 @@ Point a Firefly III webhook at Sparkfly, define rules ("expense account = Indian
 
 > "Lunch at Indian Garden, €14.50" in Firefly → "Chicken Tikka Masala, 1 serving, Lunch" in SparkyFitness.
 
-Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **Milestones 1–2 complete** — see [milestones](#milestones).
+Design: [docs/DESIGN.md](docs/DESIGN.md) · Status: **Milestones 1–3 complete** — see [milestones](#milestones).
 
 ## How it works
 
@@ -17,7 +17,7 @@ Firefly III ──POST /hooks/firefly──▶ Sparkfly ──REST──▶ Spar
                                       ├─ dedupe on webhook uuid
                                       ├─ evaluate rules per split (journal)
                                       ├─ call SparkyFitness (async queue, retry w/ backoff)
-                                      └─ SQLite: events, journal→entry links, activity log
+                                      └─ SQLite: events, journal→entry links, rules, activity log
 ```
 
 - **Ack fast, process async** — Firefly only retries on failure, so Sparkfly replies `202` right after the signature check and processes on an in-process queue with exponential backoff. SparkyFitness being down does not lose entries.
@@ -69,11 +69,11 @@ curl -s -X POST localhost:8080/hooks/firefly \
   -H 'Content-Type: application/json' -H "Signature: t=$T,v1=$V1" -d "$BODY"
 ```
 
-Tests: `npm test` (104 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes).
+Tests: `npm test` (121 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes, rule editor UI, SparkyFitness lookups, dry-run event pages).
 
 ## Rules
 
-Rules live in `config/rules.yaml` (see the example for every option). Rules are checked in order; the **first match wins** unless the rule sets `continue: true`.
+Rules live in the SQLite database and are managed in the web UI at `/rules` (list, reorder, edit, delete; SparkyFitness search typeaheads fill in the UUIDs). On first start, `config/rules.yaml` is imported once into the database if present — from then on the UI is the source of truth (see the example for every option). Rules are checked in order; the **first match wins** unless the rule sets `continue: true`.
 
 ```yaml
 rules:
@@ -115,7 +115,7 @@ rules:
 | `FIREFLY_URL`, `FIREFLY_PAT` | no | — | Reserved for milestone 4 (auto-register webhook, backfill) |
 | `HOST` / `PORT` | no | `0.0.0.0` / `8080` | Listen address |
 | `SPARKFLY_DATA_DIR` | no | `./data` (container: `/data`) | SQLite database location |
-| `RULES_FILE` | no | `./config/rules.yaml` (container: `/config/rules.yaml`) | Rules YAML (missing = no rules) |
+| `RULES_FILE` | no | `./config/rules.yaml` (container: `/config/rules.yaml`) | One-time first-start import into the DB (missing = no rules) |
 | `SPARKFLY_WEBHOOK_PATH` | no | `/hooks/firefly` | Webhook route |
 | `LOG_LEVEL` | no | `info` | pino level |
 | `SPARKFLY_MAX_ATTEMPTS` | no | `10` | Give up (status `dead`) after this many tries |
@@ -128,5 +128,5 @@ rules:
 
 - [x] **1 — MVP**: webhook endpoint, HMAC-SHA3-256 signature check, YAML rules, saved-meal + single-food (+`foods`) logging, `STORE_TRANSACTION`, SQLite event/link/activity log, Docker image, status page, dry run.
 - [x] **2 — Lifecycle**: `UPDATE_TRANSACTION` (re-match → update / replace / delete) and `DESTROY_TRANSACTION` (delete linked entry) through the link table, plus a retry button for `dead` events on the status page. Meals are updated via `PUT` (re-created if the entry vanished on the SparkyFitness side); food entries ride the `(source, source_id)` upsert key.
-- [ ] **3 — UI**: rule editor with SparkyFitness search typeaheads, dry-run tester, full activity log.
+- [x] **3 — UI**: rules moved to SQLite and managed in the web UI — list/reorder/edit/delete, SparkyFitness search typeaheads (meals, foods + variants, meal types), "new rule from this transaction" prefill, per-event page with a live dry-run plan (nothing is written) and the activity log, plus a JSON rule API. The YAML file is a one-time first-start import only.
 - [ ] **4 — Extras**: backfill from the Firefly API, webhook auto-registration, amount-based quantity in the UI, failure notifications.

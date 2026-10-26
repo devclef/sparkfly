@@ -102,6 +102,28 @@ export class SparkyClient {
     await this.request('PUT', `/api/food-entry-meals/${encodeURIComponent(id)}`, body);
   }
 
+  // ------------------------------------------------------------------ //
+  // Lookups used by the rule editor's typeaheads. Responses are passed
+  // through as-is (the UI normalises them defensively).
+  // ------------------------------------------------------------------ //
+
+  mealTypes(): Promise<unknown> {
+    return this.request('GET', '/api/meal-types');
+  }
+
+  /** Full meal list (used when the typeahead search term is empty). */
+  listMeals(): Promise<unknown> {
+    return this.request('GET', '/api/meals');
+  }
+
+  searchMeals(term: string): Promise<unknown> {
+    return this.request('GET', `/api/meals/search?searchTerm=${encodeURIComponent(term)}`);
+  }
+
+  searchFoods(term: string): Promise<unknown> {
+    return this.request('GET', `/api/foods/search?searchTerm=${encodeURIComponent(term)}`);
+  }
+
   async deleteMeal(id: string): Promise<void> {
     await this.request('DELETE', `/api/food-entry-meals/${encodeURIComponent(id)}`);
   }

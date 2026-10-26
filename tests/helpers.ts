@@ -5,6 +5,7 @@ import pino from 'pino';
 import type { AppConfig } from '../src/config.js';
 import { openDb, type Db } from '../src/db/index.js';
 import { compileRules, type CompiledRules } from '../src/rules/compile.js';
+import { RulesRegistry } from '../src/rules/registry.js';
 import { rulesFileSchema } from '../src/rules/types.js';
 import { signHeader } from '../src/firefly/signature.js';
 import { SparkyClient } from '../src/sparky/client.js';
@@ -64,7 +65,8 @@ export function fakeSparky(): {
   };
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
-    const p = new URL(url).pathname;
+    const u = new URL(url);
+    const p = u.pathname + u.search;
     const body: Record<string, unknown> | undefined = init?.body ? JSON.parse(init.body as string) : undefined;
     const call: SparkyCall = { method: init?.method ?? 'GET', path: p, body: body ?? {} };
     calls.push(call);
@@ -106,6 +108,28 @@ export function makeSparky(cfg: AppConfig, fake: ReturnType<typeof fakeSparky>):
 
 export function compileFile(file: unknown): CompiledRules {
   return compileRules(rulesFileSchema.parse(file));
+}
+
+const silentLogger = { info() {}, warn() {}, error() {}, debug() {} } as never;
+
+/**
+ * Seed a database's rules table from a RulesFile-shaped object (or start
+ * empty) and return a registry over it — the same path production uses
+ * after the UI saves rules.
+ */
+export function makeRegistry(db: Db, file: unknown = {}): RulesRegistry {
+  const parsed = rulesFileSchema.parse(file);
+  db.withTransaction(() => {
+    // Replace whatever the table currently holds (tests model "the rules
+    // table now contains exactly this file").
+    for (const row of db.listRules()) db.deleteRule(row.id);
+    parsed.rules.forEach((r, i) =>
+      db.insertRule({ name: r.name, match: r.match, action: r.action, cont: r['continue'], position: i + 1 }),
+    );
+    db.setSetting('defaults.meal_type_auto', JSON.stringify(parsed.defaults.meal_type_auto));
+    db.setSetting('defaults.global_skip_tag', parsed.defaults.global_skip_tag);
+  });
+  return new RulesRegistry(db, silentLogger);
 }
 
 /** The ruleset most tests use: one saved-meal rule + one single-food rule. */

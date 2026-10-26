@@ -4,8 +4,8 @@ import { VERSION } from './constants.js';
 import { openDb } from './db/index.js';
 import { EventQueue } from './core/queue.js';
 import { EventProcessor } from './core/processEvent.js';
-import { compileRules } from './rules/compile.js';
-import { loadRulesFile } from './rules/load.js';
+import { importRulesFileIfFirstTime } from './rules/importFile.js';
+import { RulesRegistry } from './rules/registry.js';
 import { SparkyClient } from './sparky/client.js';
 import { buildApp } from './web/server.js';
 
@@ -15,12 +15,18 @@ async function main(): Promise<void> {
   logger.info({ ...describeConfig(cfg), version: VERSION }, 'starting sparkfly');
 
   const db = openDb(cfg.dbPath, logger.child({ module: 'db' }));
-  const { file: rulesFile, loadedFrom } = loadRulesFile(cfg.rulesFile);
-  const compiled = compileRules(rulesFile);
+  // Rules live in the database (managed in the web UI). A YAML file, if
+  // present, is imported exactly once on first start.
+  const imported = importRulesFileIfFirstTime(db, cfg.rulesFile, logger.child({ module: 'rules' }));
+  const registry = new RulesRegistry(db, logger.child({ module: 'rules' }));
   logger.info(
-    { rules: compiled.rules.length, rulesFile: loadedFrom ?? '(no file — running with no rules)' },
-    'rules loaded',
+    {
+      rules: registry.compiled.rules.length,
+      source: registry.importedFrom ? `imported from ${registry.importedFrom}` : 'database (managed in the UI)',
+    },
+    'rules ready',
   );
+  void imported;
 
   if (!cfg.fireflyWebhookSecret) {
     logger.warn('FIREFLY_WEBHOOK_SECRET is not set — every webhook delivery will be rejected with 503');
@@ -43,7 +49,7 @@ async function main(): Promise<void> {
     db,
     cfg,
     sparky,
-    compiled,
+    registry,
     logger: logger.child({ module: 'processor' }),
   });
   const queue = new EventQueue({
@@ -59,7 +65,7 @@ async function main(): Promise<void> {
     logger.info({ requeued: requeued.length }, 're-queued events from a previous run');
   }
 
-  const app = buildApp({ cfg, db, queue, processor, compiled, rulesLoadedFrom: loadedFrom });
+  const app = buildApp({ cfg, db, queue, processor, registry, sparky, importedFrom: registry.importedFrom });
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
