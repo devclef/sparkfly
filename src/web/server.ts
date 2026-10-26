@@ -20,7 +20,9 @@ import type { RuleSpec } from '../rules/types.js';
 import type { SparkyClient } from '../sparky/client.js';
 import { esc, page } from './layout.js';
 import { renderEventPage, renderRuleForm, renderRulesList, ruleViewFromRow } from './rulesUi.js';
-import { renderStatusPage } from './statusPage.js';
+import { renderFiltersPage, renderStatusPage, type WebhookRow, type WebhookView } from './statusPage.js';
+import { FILTER_FIELDS, filterFromForm, loadFilters, saveFilters, visibilityPredicate } from '../rules/webhookFilters.js';
+import { formatDateFromParts, formatTimeFromParts, toLocalParts } from '../rules/mealType.js';
 
 export type SparkflyApp = FastifyInstance<Server, IncomingMessage, ServerResponse<IncomingMessage>, FastifyBaseLogger>;
 
@@ -42,6 +44,9 @@ interface RawBodyRequest {
 }
 
 const BODY_LIMIT = 1024 * 1024;
+/** How many recent deliveries the dashboard scans, and how many rows it shows. */
+const WEBHOOK_SCAN = 500;
+const WEBHOOK_ROWS = 50;
 const startedAt = Date.now();
 
 function safeEqual(a: string, b: string): boolean {
@@ -148,14 +153,62 @@ export function buildApp(deps: AppDeps): SparkflyApp {
     if (!checkAuth(request, reply, cfg.adminPassword)) return;
     const host = request.headers.host ?? `localhost:${cfg.port}`;
     const webhookUrl = `http://${host}${cfg.webhookPath}`;
-    const events = db.recentEvents(25).map((e) => ({
-      id: e.id,
-      trigger: e.trigger,
-      status: e.status,
-      attempts: e.attempts,
-      summary: e.result_summary ?? e.last_error,
-      createdAt: e.created_at,
-    }));
+    const rawView = (request.query as { view?: string }).view;
+    const view: WebhookView = rawView === 'all' || rawView === 'needs-rule' ? rawView : 'shown';
+    const filters = loadFilters(db);
+    const isVisible = visibilityPredicate(filters);
+    // Look further back than we display, so filters that hide most
+    // transactions still leave a useful list.
+    const allRows = db.recentEvents(WEBHOOK_SCAN).flatMap((e): WebhookRow[] => {
+      const base = {
+        eventId: e.id,
+        trigger: e.trigger,
+        status: e.status,
+        attempts: e.attempts,
+        summary: e.result_summary ?? e.last_error,
+        receivedAt: e.created_at,
+      };
+      let splits: import('../firefly/types.js').FireflySplit[];
+      try {
+        splits = fireflyPayloadSchema.parse(JSON.parse(e.raw_json)).content.transactions;
+      } catch {
+        splits = [];
+      }
+      if (splits.length === 0) return [{ ...base, tx: null, outcome: 'n/a', rules: [], hidden: false }];
+      const evaluates = e.trigger === 'STORE_TRANSACTION' || e.trigger === 'UPDATE_TRANSACTION';
+      return splits.map((s) => {
+        const local = toLocalParts(new Date(s.date), cfg.tz);
+        const res = evaluates ? processor.ruleOutcome(s) : null;
+        return {
+          ...base,
+          tx: {
+            journal: String(s.transaction_journal_id),
+            date: `${formatDateFromParts(local)} ${formatTimeFromParts(local)}`,
+            type: s.type,
+            description: s.description ?? null,
+            amount: s.amount,
+            currency: s.currency_code,
+            source: s.source_name ?? null,
+            destination: s.destination_name ?? null,
+            budget: s.budget_name ?? null,
+            category: s.category_name ?? null,
+            tags: s.tags,
+          },
+          outcome: !res ? 'n/a' : res.skipped ? 'skip-tag' : res.rules.length > 0 ? 'matched' : 'needs-rule',
+          rules: res?.rules ?? [],
+          hidden: !isVisible(s),
+        };
+      });
+    });
+    const shownRows = allRows.filter((r) => !r.hidden);
+    const counts = {
+      shown: shownRows.length,
+      hidden: allRows.length - shownRows.length,
+      needsRule: shownRows.filter((r) => r.outcome === 'needs-rule').length,
+    };
+    const webhooks = (
+      view === 'all' ? allRows : view === 'needs-rule' ? shownRows.filter((r) => r.outcome === 'needs-rule') : shownRows
+    ).slice(0, WEBHOOK_ROWS);
     const links = db.allLinks(25).map((l) => ({
       journal_id: l.journal_id,
       rule_id: l.rule_id,
@@ -178,11 +231,70 @@ export function buildApp(deps: AppDeps): SparkflyApp {
           webhookUrl,
           webhookSecret: cfg.fireflyWebhookSecret ?? null,
           adminPasswordSet: Boolean(cfg.adminPassword),
-          events,
+          webhooks,
+          view,
+          counts,
+          filters,
           links,
           queueDepth: queue.size,
         }),
       );
+  });
+
+  // ------------------------------------------------------------------ //
+  // Webhook filters (which transactions the dashboard shows)
+  // ------------------------------------------------------------------ //
+  app.get('/filters', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const q = request.query as Record<string, string | undefined>;
+    const prefill: Record<string, string> = {};
+    for (const k of ['mode', 'type', 'name', ...FILTER_FIELDS]) {
+      const v = q[k];
+      if (typeof v === 'string') prefill[k] = v;
+    }
+    return reply
+      .type('text/html; charset=utf-8')
+      .send(renderFiltersPage({ filters: loadFilters(db), errors: [], prefill }));
+  });
+
+  app.post('/filters', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const body = (request.body ?? {}) as Record<string, string | undefined>;
+    const res = filterFromForm(body);
+    const filters = loadFilters(db);
+    if (!res.ok) {
+      const prefill = Object.fromEntries(
+        Object.entries(body).filter((e): e is [string, string] => typeof e[1] === 'string'),
+      );
+      return reply
+        .code(422)
+        .type('text/html; charset=utf-8')
+        .send(renderFiltersPage({ filters, errors: res.errors, prefill }));
+    }
+    const id = filters.reduce((max, f) => Math.max(max, f.id), 0) + 1;
+    saveFilters(db, [...filters, { id, ...res.filter }]);
+    app.log.info({ id, mode: res.filter.mode }, 'webhook filter added');
+    return reply.redirect('/filters');
+  });
+
+  app.post('/filters/:id/toggle', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    const filters = loadFilters(db);
+    const f = filters.find((x) => x.id === id);
+    if (!f) return reply.code(404).send({ error: 'filter not found' });
+    f.enabled = !f.enabled;
+    saveFilters(db, filters);
+    return reply.redirect('/filters');
+  });
+
+  app.post('/filters/:id/delete', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const id = Number((request.params as { id: string }).id);
+    const filters = loadFilters(db);
+    if (!filters.some((x) => x.id === id)) return reply.code(404).send({ error: 'filter not found' });
+    saveFilters(db, filters.filter((x) => x.id !== id));
+    return reply.redirect('/filters');
   });
 
   // ------------------------------------------------------------------ //

@@ -40,6 +40,7 @@ export const PAGE_CSS = `
   .badge.warn { background: #3a2f14; color: #f6c453; }
   .badge.err { background: #3a1a1c; color: #f28b8b; }
   .badge.info { background: #16283c; color: #6ea8fe; }
+  .badge.muted { background: #1f2733; color: #8b93a3; }
   .warnbox { background: #3a2f14; border: 1px solid #6b5416; color: #f6c453; border-radius: 10px; padding: .6rem 1rem; margin: .75rem 0; }
   .infobox { background: #16283c; border: 1px solid #274b7a; color: #9ec5f8; border-radius: 10px; padding: .6rem 1rem; margin: .75rem 0; }
   .errbox { background: #3a1a1c; border: 1px solid #7f1d1d; color: #f28b8b; border-radius: 10px; padding: .6rem 1rem; margin: .75rem 0; }
@@ -57,13 +58,20 @@ export const PAGE_CSS = `
   .typeahead-list .tt .variant { margin-left: 1.5rem; font-size: .85em; color: #8b93a3; }
   .plan-line { padding: .3rem .6rem; border-bottom: 1px solid #1d2430; }
   .plan-line:last-child { border-bottom: 0; }
+  tr.hidden-row td { opacity: .45; }
+  .tx-desc { font-weight: 500; }
+  .tx-sub { color: #8b93a3; font-size: .8rem; }
+  .amount { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .nowrap { white-space: nowrap; }
+  .filterbar { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; margin: .25rem 0 .5rem; }
+  .filterbar a.on { color: #e6e9ee; font-weight: 600; text-decoration: none; }
   .actions { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
 `;
 
 /** Full HTML document frame with the top navigation. */
 export function page(opts: {
   title: string;
-  active: 'dashboard' | 'rules';
+  active: 'dashboard' | 'rules' | 'filters';
   body: string;
   scripts?: string;
 }): string {
@@ -72,6 +80,7 @@ export function page(opts: {
   <strong>⚡ Sparkfly</strong>
   <a href="/" class="${opts.active === 'dashboard' ? 'active' : ''}">Dashboard</a>
   <a href="/rules" class="${opts.active === 'rules' ? 'active' : ''}">Rules</a>
+  <a href="/filters" class="${opts.active === 'filters' ? 'active' : ''}">Webhook filters</a>
   <span class="muted">v${esc(VERSION)}</span>
 </div>`;
   return `<!doctype html>

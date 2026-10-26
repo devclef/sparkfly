@@ -286,4 +286,81 @@ describe('status endpoints', () => {
     });
     expect(bad.statusCode).toBe(401);
   });
+
+  it('GET / lists transaction details and flags transactions that need a rule', async () => {
+    const stack = startStack({ tz: 'Europe/Berlin' });
+    const a = await postHook(stack.app, buildPayload(), { secret: SECRET });
+    const b = await postHook(
+      stack.app,
+      buildPayload({ uuid: 'uuid-2' }, { transaction_journal_id: 99, description: 'Burger Barn', destination_name: 'Burger Barn', budget_name: 'Food', category_name: 'Fast food' }),
+      { secret: SECRET },
+    );
+    for (const r of [a, b]) {
+      const id = r.json().event_id as number;
+      await waitFor(() => stack.db.getEvent(id)!.status === 'succeeded', 'event to succeed');
+    }
+    const html = (await stack.app.inject({ method: 'GET', url: '/' })).payload;
+    expect(html).toContain('2026-10-25 13:41'); // transaction date in TZ (CET after DST ends)
+    expect(html).toContain('Burger Barn');
+    expect(html).toContain('Fast food');
+    expect(html).toContain('14.50');
+    expect(html).toContain('needs rule');
+    expect(html).toContain('Needs a rule (1)');
+    expect(html).toContain(`/rules/new?event=${b.json().event_id}&amp;split=99`);
+
+    const needs = (await stack.app.inject({ method: 'GET', url: '/?view=needs-rule' })).payload;
+    expect(needs).toContain('Burger Barn');
+    expect(needs).not.toContain('<span class="tx-desc">Indian Garden</span>');
+  });
+
+  it('webhook filters hide transactions from the dashboard', async () => {
+    const stack = startStack();
+    const a = await postHook(stack.app, buildPayload(), { secret: SECRET });
+    const b = await postHook(
+      stack.app,
+      buildPayload({ uuid: 'uuid-rent' }, { transaction_journal_id: 7, description: 'October rent', destination_name: 'Landlord', budget_name: 'Housing', category_name: 'Rent' }),
+      { secret: SECRET },
+    );
+    for (const r of [a, b]) {
+      const id = r.json().event_id as number;
+      await waitFor(() => stack.db.getEvent(id)!.status === 'succeeded', 'event to succeed');
+    }
+
+    const form = (await stack.app.inject({ method: 'GET', url: '/filters?mode=include&budget=Food' })).payload;
+    expect(form).toContain('value="Food"');
+
+    const add = await stack.app.inject({
+      method: 'POST',
+      url: '/filters',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: 'mode=include&budget=Food',
+    });
+    expect(add.statusCode).toBe(302);
+    expect((await stack.app.inject({ method: 'GET', url: '/filters' })).payload).toContain('budget = Food');
+
+    const shown = (await stack.app.inject({ method: 'GET', url: '/' })).payload;
+    expect(shown).toContain('<span class="tx-desc">Indian Garden</span>');
+    expect(shown).not.toContain('October rent');
+    expect(shown).toContain('All incl. hidden (2)');
+
+    const all = (await stack.app.inject({ method: 'GET', url: '/?view=all' })).payload;
+    expect(all).toContain('October rent');
+    expect(all).toContain('hidden by filter');
+
+    const bad = await stack.app.inject({
+      method: 'POST',
+      url: '/filters',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: 'mode=exclude',
+    });
+    expect(bad.statusCode).toBe(422);
+
+    const toggle = await stack.app.inject({ method: 'POST', url: '/filters/1/toggle' });
+    expect(toggle.statusCode).toBe(302);
+    expect((await stack.app.inject({ method: 'GET', url: '/' })).payload).toContain('October rent');
+
+    const del = await stack.app.inject({ method: 'POST', url: '/filters/1/delete' });
+    expect(del.statusCode).toBe(302);
+    expect((await stack.app.inject({ method: 'GET', url: '/filters' })).payload).toContain('no filters yet');
+  });
 });

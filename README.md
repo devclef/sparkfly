@@ -37,7 +37,7 @@ Then:
 
 1. In Firefly III: *Administration → Configuration* → allow webhooks (admin).
 2. *Automation → Webhooks* → new: URL `http://<sparkfly-host>:8080/hooks/firefly`, triggers `STORE_TRANSACTION` + `UPDATE_TRANSACTION` + `DESTROY_TRANSACTION`, response `TRANSACTIONS`, delivery `JSON`, paste the secret shown in Firefly into your `.env` (or read it back from Sparkfly's setup page).
-3. Watch it work: open `http://<sparkfly-host>:8080/` — setup details, your rules, and every webhook delivery with its outcome. `GET /health` for monitoring.
+3. Watch it work: open `http://<sparkfly-host>:8080/` — setup details, your rules, and every webhook delivery with its transaction date, description, amount, destination, budget, category, matched rule (or a **needs rule** flag) and outcome. `GET /health` for monitoring.
 
 Prefer to try it without Firefly/Sparky? `DRY_RUN=true` starts the app and evaluates all rules without writing to SparkyFitness.
 
@@ -69,7 +69,7 @@ curl -s -X POST localhost:8080/hooks/firefly \
   -H 'Content-Type: application/json' -H "Signature: t=$T,v1=$V1" -d "$BODY"
 ```
 
-Tests: `npm test` (121 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes, rule editor UI, SparkyFitness lookups, dry-run event pages).
+Tests: `npm test` (130 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes, rule editor UI, SparkyFitness lookups, dry-run event pages, webhook filters).
 
 ## Rules
 
@@ -101,6 +101,15 @@ rules:
 - A transaction tagged `no-sparky` (configurable in `defaults.global_skip_tag`) is skipped entirely.
 - `entry_date` / `entry_time` come from the Firefly date converted to `TZ`; a `00:00` time (no time entered in Firefly) omits `entry_time`.
 - `foods` actions log each item as its own entry (upsert key = `<journal id>:<index>`).
+
+## Webhook filters
+
+Firefly sends *every* transaction to Sparkfly, and most of them (rent, groceries, salary) will never become a meal. At `/filters` you can define which transactions the dashboard shows:
+
+- **include**: when any include filter is enabled, only transactions matching at least one are shown (e.g. budget `Food`, or category `/eating out|coffee/i`).
+- **exclude**: matching transactions are hidden (e.g. destination `Landlord`). Each dashboard row has a **hide** shortcut that pre-fills one.
+
+All fields filled in on one filter must match. Patterns use the rule syntax: exact (case-insensitive) or a `/regex/flags` literal. Filters only change what is displayed; rules still run on everything. The dashboard tabs **Shown**, **Needs a rule** and **All incl. hidden** make it obvious which food transactions still lack a rule.
 
 ## Configuration (env)
 

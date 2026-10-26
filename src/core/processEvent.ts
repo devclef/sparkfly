@@ -360,6 +360,15 @@ export class EventProcessor {
     return { deleted, note: '' };
   }
 
+  /**
+   * Which rules the *current* rule set matches for a split (no side
+   * effects). The dashboard uses it to flag transactions that need a rule.
+   */
+  ruleOutcome(split: FireflySplit): { skipped: boolean; rules: string[] } {
+    const { hits, skipped } = this.matchRules(split, this.buildContext(split));
+    return { skipped, rules: hits.map((r) => r.name) };
+  }
+
   /** Shared context (split + local wall-clock parts) for rule evaluation. */
   private buildContext(split: FireflySplit): SplitContext {
     return { split, local: toLocalParts(new Date(split.date), this.deps.cfg.tz) };
