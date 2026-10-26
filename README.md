@@ -48,8 +48,8 @@ Every release publishes `ghcr.io/devclef/sparkfly:<version>` (and `:<major>.<min
 ## Releasing
 
 1. Bump the version in `package.json`, `package-lock.json` and `src/constants.ts`, and add a section to `CHANGELOG.md`.
-2. Merge to `main`, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. The *Release* workflow checks that the tag matches the app version, runs the tests, publishes the image and creates the GitHub release from the changelog section.
+2. Merge to `main`, then either push a tag (`git tag v0.2.0 && git push origin v0.2.0`) or run the *Release* workflow by hand on `main` (*Actions → Release → Run workflow*), which releases the version in `package.json` and creates the tag itself.
+3. The workflow checks that the tag matches the app version, runs the tests, publishes the image and creates the GitHub release from the changelog section.
 
 ## Local development
 

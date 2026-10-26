@@ -1,16 +1,47 @@
 name: Release
 
+# Either push a tag (git push origin v0.2.0) or run this workflow by hand
+# on main: it then releases the version in package.json and creates the
+# tag itself.
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  prepare:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            if [ "$GITHUB_REF_NAME" != "main" ]; then
+              echo "::error::run the release from main (got $GITHUB_REF_NAME)"
+              exit 1
+            fi
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "releasing $tag from $GITHUB_SHA"
+
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: prepare
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -25,13 +56,15 @@ jobs:
         run: npm ci
 
       - name: Check the tag matches the app version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="$VERSION"
           pkg="$(node -p "require('./package.json').version")"
           app="$(sed -n "s/^export const VERSION = '\(.*\)';$/\1/p" src/constants.ts)"
           echo "tag=$tag package.json=$pkg constants.ts=$app"
           if [ "$tag" != "$pkg" ] || [ "$tag" != "$app" ]; then
-            echo "::error::tag v$tag does not match package.json ($pkg) / src/constants.ts ($app)"
+            echo "::error::release v$tag does not match package.json ($pkg) / src/constants.ts ($app)"
             exit 1
           fi
 
@@ -44,10 +77,12 @@ jobs:
   image:
     name: Publish image
     runs-on: ubuntu-latest
-    needs: test
+    needs: [prepare, test]
     permissions:
       contents: read
       packages: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -58,7 +93,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$VERSION"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           docker build \
             --label "org.opencontainers.image.version=$version" \
@@ -68,7 +103,7 @@ jobs:
 
       - name: Smoke test image
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$VERSION"
           docker run -d --name sparkfly -e DRY_RUN=true -p 127.0.0.1:8080:8080 "ghcr.io/${GITHUB_REPOSITORY,,}:$version"
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/health | tee /dev/stderr | grep -q "\"version\":\"$version\""; then
@@ -84,7 +119,7 @@ jobs:
 
       - name: Push image to GHCR
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$VERSION"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           docker push "$image:$version"
           docker push "$image:${version%.*}"
@@ -92,16 +127,19 @@ jobs:
   release:
     name: GitHub release
     runs-on: ubuntu-latest
-    needs: image
+    needs: [prepare, image]
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
       - name: Extract release notes from CHANGELOG.md
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$VERSION"
           awk -v v="$version" '
             $0 ~ "^## \\[" v "\\]" { on = 1; next }
             on && /^## \[/ { exit }
@@ -119,8 +157,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md
           else
-            gh release create "$GITHUB_REF_NAME" --title "Sparkfly $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+            # On a manual run the tag does not exist yet: --target creates it
+            # at the commit that was tested and published.
+            gh release create "$TAG" --title "Sparkfly $TAG" --notes-file notes.md --target "$GITHUB_SHA"
           fi
