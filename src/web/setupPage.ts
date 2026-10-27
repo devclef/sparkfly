@@ -27,7 +27,7 @@ export interface SetupPageData {
     scan: BackfillScan | null;
     error: string | null;
     /** Set after "queue" was pressed. */
-    queued: { queued: number; duplicates: number } | null;
+    queued: { queued: number; duplicates: number; retried: number } | null;
   };
   /** One-off success / error banner after a POST. */
   flash: { kind: 'ok' | 'err'; text: string } | null;

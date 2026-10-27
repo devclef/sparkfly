@@ -4,6 +4,13 @@ All notable changes to Sparkfly are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Backfill
+- Re-running a backfill range now re-queues groups whose earlier backfill
+  went `dead` (fresh retry budget) and reports them separately, instead of
+  silently counting them as duplicates.
+
 ## [0.2.0] — 2026-10-27
 
 Milestone 4: the extras. Everything Firefly-side lives on the new **Setup**
