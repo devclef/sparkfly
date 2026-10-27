@@ -149,7 +149,7 @@ ${counts.queue > 0 && !b.queued ? `
 </form>` : ''}`;
   }
   const queuedHtml = b.queued
-    ? `<div class="infobox">Queued ${b.queued.queued} transaction${b.queued.queued === 1 ? '' : 's'}${b.queued.duplicates ? ` (${b.queued.duplicates} were already backfilled before)` : ''}. Follow them on the <a href="/?view=all">dashboard</a>.</div>`
+    ? `<div class="infobox">Queued ${b.queued.queued} transaction${b.queued.queued === 1 ? '' : 's'}${b.queued.duplicates ? ` (${b.queued.duplicates} were already backfilled before)` : ''}${b.queued.retried ? `; ${b.queued.retried} group${b.queued.retried === 1 ? '' : 's'} that went dead earlier ${b.queued.retried === 1 ? 'was' : 'were'} retried` : ''}. Follow them on the <a href="/?view=all">dashboard</a>.</div>`
     : '';
   const backfillSection = !d.fireflyConfigured
     ? apiMissing

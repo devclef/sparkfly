@@ -110,9 +110,10 @@ export function backfillPayload(c: BackfillCandidate): FireflyPayload {
 export function queueBackfill(
   deps: { db: Db; queue: EventQueue },
   scan: BackfillScan,
-): { queued: number; duplicates: number } {
+): { queued: number; duplicates: number; retried: number } {
   let queued = 0;
   let duplicates = 0;
+  let retried = 0;
   for (const c of scan.candidates) {
     if (c.status !== 'queue') continue;
     const payload = backfillPayload(c);
@@ -122,12 +123,22 @@ export function queueBackfill(
       rawJson: JSON.stringify(payload),
     });
     if (duplicate) {
-      duplicates += 1;
+      const event = deps.db.getEvent(id);
+      if (event && event.status === 'dead') {
+        // A previous backfill of this group used up its retry budget:
+        // re-run the range with a fresh one (SparkyFitness is probably back).
+        deps.db.resetEventForRetry(id);
+        deps.db.addLog(id, 'info', `backfill ${scan.start}…${scan.end}: re-queued a dead backfill with a fresh retry budget`);
+        deps.queue.enqueue(id);
+        retried += 1;
+      } else {
+        duplicates += 1;
+      }
       continue;
     }
     deps.db.addLog(id, 'info', `backfill ${scan.start}…${scan.end}: queued Firefly transaction group ${c.groupId}`);
     deps.queue.enqueue(id);
     queued += 1;
   }
-  return { queued, duplicates };
+  return { queued, duplicates, retried };
 }

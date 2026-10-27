@@ -292,6 +292,23 @@ describe('backfill', () => {
     expect(s.db.recentEvents(10).map((e) => e.uuid)).toEqual(['backfill-503']);
   });
 
+  it('retries dead backfills when the range is run again', async () => {
+    const s = startStack({ retry: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 5 } });
+    s.sparky.failNext = 10; // SparkyFitness is down
+    await s.app.inject({ method: 'POST', url: '/setup/backfill', ...form({ start: '2026-09-01', end: '2026-09-30', mode: 'run' }) });
+    await waitFor(() => s.db.recentEvents(10).every((e) => e.status === 'dead'), 'backfills to go dead');
+    expect(s.db.recentEvents(10)).toHaveLength(2);
+
+    s.sparky.failNext = 0; // it is back
+    const again = await s.app.inject({ method: 'POST', url: '/setup/backfill', ...form({ start: '2026-09-01', end: '2026-09-30', mode: 'run' }) });
+    expect(again.body).toContain('Queued 0 transactions');
+    expect(again.body).toContain('2 groups that went dead earlier were retried');
+    expect(s.db.recentEvents(10)).toHaveLength(2); // still deduped by uuid
+
+    await waitFor(() => s.db.recentEvents(10).every((e) => e.status === 'succeeded'), 'retries to succeed');
+    expect(s.sparky.calls.filter((c) => c.method === 'POST')).toHaveLength(4); // 2 failed + 2 retried
+  });
+
   it('reports a bad range and a missing API', async () => {
     const s = startStack();
     const bad = await s.app.inject({ method: 'POST', url: '/setup/backfill', ...form({ start: '2026-10-01', end: '2026-09-01' }) });
