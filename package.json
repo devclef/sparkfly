@@ -1,6 +1,6 @@
 {
   "name": "sparkfly",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Bridge Firefly III transactions into SparkyFitness diary entries via signed webhooks.",
   "license": "MIT",
   "type": "module",

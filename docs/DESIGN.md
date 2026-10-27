@@ -138,7 +138,7 @@ DRY_RUN=false
 1. **MVP**: webhook endpoint, signature check, rules in YAML, single-food and saved-meal logging, `STORE` only, SQLite log, Docker image.
 2. **Lifecycle**: `UPDATE` and `DESTROY` through the link table, retries, idempotency on the webhook uuid.
 3. **UI**: rule editor with SparkyFitness search, dry-run tester, activity log.
-4. **Extras**: backfill (run the rules over past Firefly transactions through the API), webhook auto-registration, amount-based quantity, notifications on failure.
+4. **Extras** (done in v0.2.0): backfill (run the rules over past Firefly transactions through the API), webhook auto-registration, amount-based quantity, notifications on failure.
 
 ## 8. Edge cases noted
 

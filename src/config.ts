@@ -20,6 +20,15 @@ export interface AppConfig {
   /** Optional: auto-register webhook / backfill / recent-tx tests. */
   fireflyUrl: string | undefined;
   fireflyPat: string | undefined;
+  fireflyTimeoutMs: number;
+  /** Base URL Firefly (and notification links) should use to reach Sparkfly. */
+  publicUrl: string | undefined;
+  /** Failure notifications: POST target, payload format and which events. */
+  notify: {
+    url: string | undefined;
+    format: 'json' | 'ntfy';
+    on: Set<'dead' | 'needs-rule'>;
+  };
   /** IANA time zone used for `meal_type: auto` and entry_date/entry_time. */
   tz: string;
   dryRun: boolean;
@@ -41,6 +50,23 @@ function int(name: string, raw: string | undefined, fallback: number): number {
   const n = Number.parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0) throw new Error(`env ${name} must be a non-negative integer, got "${raw}"`);
   return n;
+}
+
+function notifyFormat(raw: string | undefined): 'json' | 'ntfy' {
+  const v = (raw ?? 'json').trim().toLowerCase();
+  if (v !== 'json' && v !== 'ntfy') throw new Error(`env NOTIFY_FORMAT must be "json" or "ntfy", got "${raw}"`);
+  return v;
+}
+
+function notifyOn(raw: string | undefined): Set<'dead' | 'needs-rule'> {
+  const out = new Set<'dead' | 'needs-rule'>();
+  for (const part of (raw ?? 'dead').split(',').map((p) => p.trim().toLowerCase()).filter(Boolean)) {
+    if (part !== 'dead' && part !== 'needs-rule') {
+      throw new Error(`env NOTIFY_ON accepts "dead" and/or "needs-rule", got "${part}"`);
+    }
+    out.add(part);
+  }
+  return out;
 }
 
 /**
@@ -78,6 +104,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     sparkyApiKey,
     fireflyUrl: env.FIREFLY_URL?.replace(/\/+$/, '') || undefined,
     fireflyPat: env.FIREFLY_PAT?.trim() || undefined,
+    fireflyTimeoutMs: int('FIREFLY_TIMEOUT_MS', env.FIREFLY_TIMEOUT_MS, 30_000),
+    publicUrl: env.SPARKFLY_PUBLIC_URL?.replace(/\/+$/, '') || undefined,
+    notify: {
+      url: env.NOTIFY_URL?.trim() || undefined,
+      format: notifyFormat(env.NOTIFY_FORMAT),
+      on: notifyOn(env.NOTIFY_ON),
+    },
     tz,
     dryRun,
     adminPassword: env.ADMIN_PASSWORD || undefined,
@@ -105,5 +138,7 @@ export function describeConfig(cfg: AppConfig): Record<string, unknown> {
     webhookSecretSet: Boolean(cfg.fireflyWebhookSecret),
     fireflyApiConfigured: Boolean(cfg.fireflyUrl && cfg.fireflyPat),
     adminPasswordSet: Boolean(cfg.adminPassword),
+    publicUrl: cfg.publicUrl ?? '(from the request host)',
+    notify: cfg.notify.url ? `${cfg.notify.format} on ${[...cfg.notify.on].join(',')}` : 'off',
   };
 }

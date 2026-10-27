@@ -4,6 +4,33 @@ All notable changes to Sparkfly are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-10-27
+
+Milestone 4: the extras. Everything Firefly-side lives on the new **Setup**
+page (`/setup`), which needs `FIREFLY_URL` and `FIREFLY_PAT`.
+
+### Added
+- **Webhook auto-registration**: list Firefly's webhooks and register one
+  for Sparkfly with all three triggers. The secret Firefly generates is
+  stored and accepted next to `FIREFLY_WEBHOOK_SECRET`, which is now
+  optional. The default URL comes from the new `SPARKFLY_PUBLIC_URL`.
+- **Backfill**: run the current rules over past Firefly transactions in a
+  date range. A preview shows what would be logged; confirming queues each
+  matching transaction group as a `backfill-<group id>` event that goes
+  through the normal pipeline. Already-linked and non-matching
+  transactions are skipped and re-running a range does nothing.
+- **Failure notifications** to `NOTIFY_URL` when an event is marked
+  `dead`, and optionally (`NOTIFY_ON=dead,needs-rule`) when a new visible
+  transaction matches no rule. JSON (Slack/Discord/Mattermost-friendly)
+  or ntfy format (`NOTIFY_FORMAT`), with links to the event page and a
+  test button.
+- **Amount-based quantity in the rule editor**: a toggle with the price of
+  one unit and a live preview (pre-filled with the transaction's amount);
+  the rules list shows `qty = amount ÷ price`.
+
+### Changed
+- `FIREFLY_WEBHOOK_SECRET` is no longer required by `docker-compose.yml`.
+
 ## [0.1.0] — 2026-10-26
 
 First release. Sparkfly turns Firefly III transactions into SparkyFitness
@@ -53,4 +80,5 @@ diary entries through signed Firefly webhooks.
 - Docker image `ghcr.io/devclef/sparkfly` (non-root, `/data` volume,
   health check) and an example `docker-compose.yml`.
 
+[0.2.0]: https://github.com/devclef/sparkfly/releases/tag/v0.2.0
 [0.1.0]: https://github.com/devclef/sparkfly/releases/tag/v0.1.0

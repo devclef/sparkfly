@@ -1,7 +1,9 @@
 # Sparkfly example compose.
 #
 #   1. cp config/rules.example.yaml config/rules.yaml   # then edit the rules
-#   2. create .env with FIREFLY_WEBHOOK_SECRET, SPARKY_URL, SPARKY_API_KEY
+#   2. create .env with SPARKY_URL, SPARKY_API_KEY and either
+#      FIREFLY_WEBHOOK_SECRET or FIREFLY_URL + FIREFLY_PAT (to register the
+#      webhook from the Setup page)
 #   3. docker compose up -d --build
 #
 # Then point a Firefly webhook at http://<host>:8080/hooks/firefly
@@ -10,12 +12,12 @@ services:
   sparkfly:
     build: .
     # or use a published release instead of building:
-    # image: ghcr.io/devclef/sparkfly:0.1.0
+    # image: ghcr.io/devclef/sparkfly:0.2.0
     container_name: sparkfly
     ports:
       - "8080:8080"
     environment:
-      FIREFLY_WEBHOOK_SECRET: ${FIREFLY_WEBHOOK_SECRET:?set FIREFLY_WEBHOOK_SECRET in .env}
+      FIREFLY_WEBHOOK_SECRET: ${FIREFLY_WEBHOOK_SECRET:-}
       SPARKY_URL: ${SPARKY_URL:-http://sparkyfitness-server:3010}
       SPARKY_API_KEY: ${SPARKY_API_KEY:?set SPARKY_API_KEY in .env}
       TZ: ${TZ:-UTC}
@@ -23,6 +25,10 @@ services:
       # optional:
       # FIREFLY_URL: ${FIREFLY_URL:-}
       # FIREFLY_PAT: ${FIREFLY_PAT:-}
+      # SPARKFLY_PUBLIC_URL: ${SPARKFLY_PUBLIC_URL:-http://sparkfly:8080}
+      # NOTIFY_URL: ${NOTIFY_URL:-}
+      # NOTIFY_FORMAT: ${NOTIFY_FORMAT:-json}
+      # NOTIFY_ON: ${NOTIFY_ON:-dead}
       # ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     volumes:
       - ./data:/data

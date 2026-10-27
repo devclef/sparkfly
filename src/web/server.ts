@@ -23,6 +23,10 @@ import { renderEventPage, renderRuleForm, renderRulesList, ruleViewFromRow } fro
 import { renderFiltersPage, renderStatusPage, type WebhookRow, type WebhookView } from './statusPage.js';
 import { FILTER_FIELDS, filterFromForm, loadFilters, saveFilters, visibilityPredicate } from '../rules/webhookFilters.js';
 import { formatDateFromParts, formatTimeFromParts, toLocalParts } from '../rules/mealType.js';
+import { checkRange, queueBackfill, scanBackfill } from '../core/backfill.js';
+import type { Notifier } from '../core/notify.js';
+import type { FireflyClient, FireflyWebhook } from '../firefly/client.js';
+import { renderSetupPage, type SetupPageData } from './setupPage.js';
 
 export type SparkflyApp = FastifyInstance<Server, IncomingMessage, ServerResponse<IncomingMessage>, FastifyBaseLogger>;
 
@@ -37,6 +41,38 @@ interface AppDeps {
   sparky: SparkyClient | null;
   /** File the rules were imported from on first start, if any. */
   importedFrom: string | null;
+  /** Firefly API client (FIREFLY_URL + FIREFLY_PAT), for registration and backfill. */
+  firefly?: FireflyClient | null;
+  notifier?: Notifier | null;
+}
+
+/** Settings key for the secret Firefly returned when Sparkfly registered the webhook. */
+export const SETTING_WEBHOOK_SECRET = 'firefly.webhook_secret';
+/** Settings key for the URL that webhook was registered with. */
+export const SETTING_WEBHOOK_URL = 'firefly.webhook_url';
+
+/**
+ * The secrets a delivery may be signed with: FIREFLY_WEBHOOK_SECRET and/or
+ * the one stored by auto-registration (both are accepted, so switching
+ * from one to the other needs no downtime).
+ */
+export function webhookSecrets(cfg: AppConfig, db: Db): string[] {
+  const stored = db.getSetting(SETTING_WEBHOOK_SECRET);
+  return [cfg.fireflyWebhookSecret, stored].filter((s): s is string => Boolean(s));
+}
+
+/** The URL Firefly should deliver to: SPARKFLY_PUBLIC_URL, else the request's host. */
+function webhookUrlFor(cfg: AppConfig, request: FastifyRequest): string {
+  if (cfg.publicUrl) return `${cfg.publicUrl}${cfg.webhookPath}`;
+  const host = request.headers.host ?? `localhost:${cfg.port}`;
+  return `http://${host}${cfg.webhookPath}`;
+}
+
+/** Default backfill range: the last 30 days, in the configured TZ. */
+function defaultBackfillRange(tz: string): { start: string; end: string } {
+  const day = (d: Date): string => formatDateFromParts(toLocalParts(d, tz));
+  const now = new Date();
+  return { start: day(new Date(now.getTime() - 30 * 86_400_000)), end: day(now) };
 }
 
 interface RawBodyRequest {
@@ -133,6 +169,8 @@ function asList(v: unknown): unknown[] {
 
 export function buildApp(deps: AppDeps): SparkflyApp {
   const { cfg, db, queue, processor, registry, sparky } = deps;
+  const firefly = deps.firefly ?? null;
+  const notifier = deps.notifier ?? null;
   const app = Fastify<Server, IncomingMessage, ServerResponse<IncomingMessage>, FastifyBaseLogger>({
     logger: { level: cfg.logLevel },
     bodyLimit: BODY_LIMIT,
@@ -171,8 +209,7 @@ export function buildApp(deps: AppDeps): SparkflyApp {
 
   app.get('/', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!checkAuth(request, reply, cfg.adminPassword)) return;
-    const host = request.headers.host ?? `localhost:${cfg.port}`;
-    const webhookUrl = `http://${host}${cfg.webhookPath}`;
+    const webhookUrl = webhookUrlFor(cfg, request);
     const rawView = (request.query as { view?: string }).view;
     const view: WebhookView = rawView === 'all' || rawView === 'needs-rule' || rawView === 'problems' ? rawView : 'shown';
     const filters = loadFilters(db);
@@ -242,7 +279,7 @@ export function buildApp(deps: AppDeps): SparkflyApp {
             : 'managed in the UI',
           rules: registry.compiled.rules,
           webhookUrl,
-          webhookSecret: cfg.fireflyWebhookSecret ?? null,
+          webhookSecret: webhookSecrets(cfg, db)[0] ?? null,
           adminPasswordSet: Boolean(cfg.adminPassword),
           webhooks,
           view,
@@ -453,6 +490,112 @@ export function buildApp(deps: AppDeps): SparkflyApp {
   });
 
   // ------------------------------------------------------------------ //
+  // Setup: webhook auto-registration, backfill, notification test
+  // ------------------------------------------------------------------ //
+  const renderSetup = async (
+    request: FastifyRequest,
+    extra: { flash?: SetupPageData['flash']; backfill?: Partial<SetupPageData['backfill']> } = {},
+  ): Promise<string> => {
+    let webhooks: FireflyWebhook[] | null = null;
+    let webhooksError: string | null = null;
+    if (firefly) {
+      try {
+        webhooks = await firefly.listWebhooks();
+      } catch (err) {
+        webhooksError = (err as Error).message;
+      }
+    }
+    const range = defaultBackfillRange(cfg.tz);
+    return renderSetupPage({
+      fireflyUrl: cfg.fireflyUrl ?? null,
+      fireflyConfigured: firefly !== null,
+      webhookUrl: db.getSetting(SETTING_WEBHOOK_URL) ?? webhookUrlFor(cfg, request),
+      webhooks,
+      webhooksError,
+      secretSource: cfg.fireflyWebhookSecret ? 'env' : db.getSetting(SETTING_WEBHOOK_SECRET) ? 'registered' : 'none',
+      dryRun: cfg.dryRun,
+      notify: {
+        url: cfg.notify.url ?? null,
+        format: cfg.notify.format,
+        on: [...cfg.notify.on],
+        publicUrl: cfg.publicUrl ?? null,
+      },
+      backfill: { start: range.start, end: range.end, scan: null, error: null, queued: null, ...extra.backfill },
+      flash: extra.flash ?? null,
+    });
+  };
+  const html = (reply: FastifyReply, body: string, code = 200) =>
+    reply.code(code).type('text/html; charset=utf-8').send(body);
+
+  app.get('/setup', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    return html(reply, await renderSetup(request));
+  });
+
+  app.post('/setup/webhook', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    if (!firefly) return html(reply, await renderSetup(request, { flash: { kind: 'err', text: 'FIREFLY_URL / FIREFLY_PAT are not set.' } }), 503);
+    const url = String((request.body as { url?: string } | undefined)?.url ?? '').trim() || webhookUrlFor(cfg, request);
+    if (!/^https?:\/\/[^\s]+$/.test(url)) {
+      return html(reply, await renderSetup(request, { flash: { kind: 'err', text: `"${url}" is not an http(s) URL.` } }), 422);
+    }
+    try {
+      const res = await firefly.registerWebhook({ title: 'Sparkfly', url });
+      db.setSetting(SETTING_WEBHOOK_URL, url);
+      let text = `Registered webhook ${res.webhook.id ? `#${res.webhook.id} ` : ''}→ ${url}.`;
+      if (res.secret) {
+        db.setSetting(SETTING_WEBHOOK_SECRET, res.secret);
+        text += cfg.fireflyWebhookSecret
+          ? ' Its secret is stored and accepted next to FIREFLY_WEBHOOK_SECRET.'
+          : ' Its secret is stored; deliveries are verified with it from now on.';
+      } else {
+        text += ' Firefly did not return the secret — copy it from Firefly into FIREFLY_WEBHOOK_SECRET.';
+      }
+      app.log.info({ webhook: res.webhook.id, url }, 'webhook registered in Firefly');
+      return html(reply, await renderSetup(request, { flash: { kind: 'ok', text } }));
+    } catch (err) {
+      app.log.warn({ err: (err as Error).message }, 'webhook registration failed');
+      return html(reply, await renderSetup(request, { flash: { kind: 'err', text: `Registration failed: ${(err as Error).message}` } }), 502);
+    }
+  });
+
+  app.post('/setup/backfill', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    const body = (request.body ?? {}) as { start?: string; end?: string; mode?: string };
+    const start = String(body.start ?? '').trim();
+    const end = String(body.end ?? '').trim();
+    if (!firefly) {
+      return html(reply, await renderSetup(request, { backfill: { start, end, error: 'FIREFLY_URL / FIREFLY_PAT are not set.' } }), 503);
+    }
+    const rangeError = checkRange(start, end);
+    if (rangeError) return html(reply, await renderSetup(request, { backfill: { start, end, error: rangeError } }), 422);
+    try {
+      const scan = await scanBackfill({ firefly, processor, db }, start, end);
+      const queued = body.mode === 'run' ? queueBackfill({ db, queue }, scan) : null;
+      if (queued) app.log.info({ start, end, ...queued }, 'backfill queued');
+      return html(reply, await renderSetup(request, { backfill: { start, end, scan, queued } }));
+    } catch (err) {
+      app.log.warn({ err: (err as Error).message }, 'backfill failed');
+      return html(reply, await renderSetup(request, { backfill: { start, end, error: `Backfill failed: ${(err as Error).message}` } }), 502);
+    }
+  });
+
+  app.post('/setup/notify-test', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!checkAuth(request, reply, cfg.adminPassword)) return;
+    if (!notifier?.configured) {
+      return html(reply, await renderSetup(request, { flash: { kind: 'err', text: 'NOTIFY_URL is not set.' } }), 503);
+    }
+    const res = await notifier.send({ kind: 'test', title: 'Sparkfly test notification', message: 'Notifications from Sparkfly reach you.' });
+    return html(
+      reply,
+      await renderSetup(request, {
+        flash: res.ok ? { kind: 'ok', text: 'Test notification sent.' } : { kind: 'err', text: `Test notification failed: ${res.error}` },
+      }),
+      res.ok ? 200 : 502,
+    );
+  });
+
+  // ------------------------------------------------------------------ //
   // Programmatic rule API (JSON) — same validation as the UI
   // ------------------------------------------------------------------ //
   app.get('/api/rules', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -526,17 +669,22 @@ export function buildApp(deps: AppDeps): SparkflyApp {
       return reply.code(400).send({ error: 'empty request body' });
     }
 
-    if (!cfg.fireflyWebhookSecret) {
-      app.log.error('rejecting webhook: FIREFLY_WEBHOOK_SECRET is not configured');
+    const secrets = webhookSecrets(cfg, db);
+    if (secrets.length === 0) {
+      app.log.error('rejecting webhook: no FIREFLY_WEBHOOK_SECRET configured and no webhook registered');
       return reply.code(503).send({ error: 'webhook secret not configured on this server' });
     }
 
-    const verification = verifyWebhookSignature({
-      rawBody,
-      signatureHeader: request.headers.signature as string | undefined,
-      secret: cfg.fireflyWebhookSecret,
-      ttlSeconds: cfg.signatureTtlSeconds,
-    });
+    let verification: ReturnType<typeof verifyWebhookSignature> = { ok: false, reason: 'no secret' };
+    for (const secret of secrets) {
+      verification = verifyWebhookSignature({
+        rawBody,
+        signatureHeader: request.headers.signature as string | undefined,
+        secret,
+        ttlSeconds: cfg.signatureTtlSeconds,
+      });
+      if (verification.ok) break;
+    }
     if (!verification.ok) {
       app.log.warn({ reason: verification.reason }, 'rejecting webhook: bad signature');
       return reply.code(401).send({ error: 'invalid signature', reason: verification.reason });

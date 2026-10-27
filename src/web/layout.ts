@@ -95,7 +95,7 @@ export const PAGE_CSS = `
 /** Full HTML document frame with the top navigation. */
 export function page(opts: {
   title: string;
-  active: 'dashboard' | 'rules' | 'filters';
+  active: 'dashboard' | 'rules' | 'filters' | 'setup';
   body: string;
   scripts?: string;
 }): string {
@@ -105,6 +105,7 @@ export function page(opts: {
   <a href="/" class="${opts.active === 'dashboard' ? 'active' : ''}">Dashboard</a>
   <a href="/rules" class="${opts.active === 'rules' ? 'active' : ''}">Rules</a>
   <a href="/filters" class="${opts.active === 'filters' ? 'active' : ''}">Filters</a>
+  <a href="/setup" class="${opts.active === 'setup' ? 'active' : ''}">Setup</a>
   <span class="spacer"></span>
   <span class="muted">v${esc(VERSION)}</span>
 </div>`;

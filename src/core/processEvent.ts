@@ -12,6 +12,11 @@ import { SparkyError } from '../sparky/client.js';
 import type { SparkyClient, SparkyEntryRef } from '../sparky/client.js';
 import type { Logger } from 'pino';
 import { RetryLater } from './queue.js';
+import type { Notifier } from './notify.js';
+import { loadFilters, visibilityPredicate } from '../rules/webhookFilters.js';
+
+/** uuid prefix of events created by a backfill run (not live webhooks). */
+export const BACKFILL_UUID_PREFIX = 'backfill-';
 
 /**
  * Turns one stored webhook event into SparkyFitness entries.
@@ -42,6 +47,8 @@ export interface ProcessorDeps {
   /** DB-backed rules, reloaded whenever the UI changes them. */
   registry: RulesRegistry;
   logger: Logger;
+  /** Failure notifications; optional so tests and tools can leave it out. */
+  notifier?: Notifier | null;
 }
 
 export class EventProcessor {
@@ -63,7 +70,7 @@ export class EventProcessor {
     db.setEventStatus(eventId, 'processing');
     try {
       const payload = fireflyPayloadSchema.parse(JSON.parse(event.raw_json));
-      const result = await this.dispatch(payload, eventId);
+      const result = await this.dispatch(payload, eventId, event.uuid.startsWith(BACKFILL_UUID_PREFIX));
       db.setEventStatus(eventId, result.status, { resultSummary: result.summary });
       db.addLog(eventId, 'info', `${result.status}: ${result.summary}`);
     } catch (err) {
@@ -74,6 +81,12 @@ export class EventProcessor {
         db.setEventStatus(eventId, 'dead', { attempts, lastError: message });
         db.addLog(eventId, 'error', `giving up after ${attempts} attempts: ${message}`);
         this.deps.logger.error({ event: eventId, attempts, err: message }, 'event marked dead');
+        void this.deps.notifier?.send({
+          kind: 'dead',
+          title: `Sparkfly: event #${eventId} failed`,
+          message: `${event.trigger} gave up after ${attempts} attempts: ${message}. Retry it from the dashboard once the cause is fixed.`,
+          eventId,
+        });
         return;
       }
       const delay = this.backoffDelay(attempts);
@@ -181,6 +194,7 @@ export class EventProcessor {
   private async dispatch(
     payload: FireflyPayload,
     eventId: number,
+    backfill: boolean,
   ): Promise<{ status: EventStatus; summary: string }> {
     const trigger = payload.trigger;
     const prefix = this.deps.cfg.dryRun ? 'dry_run: ' : '';
@@ -189,11 +203,16 @@ export class EventProcessor {
     if (trigger === 'STORE_TRANSACTION') {
       let logged = 0;
       const notes: string[] = [];
+      const unmatched: FireflySplit[] = [];
       for (const split of splits) {
         const outcome = await this.processSplit(split, payload, eventId);
         if (outcome === 'logged') logged += 1;
         else notes.push(outcome);
+        if (outcome.endsWith(' no match')) unmatched.push(split);
       }
+      // Backfills only queue groups that matched, and whatever else they
+      // contain is history, not news.
+      if (!backfill) this.notifyNeedsRule(unmatched, eventId);
       const summary = `${prefix}splits=${splits.length} logged=${logged}${notes.length ? ` (${notes.join('; ')})` : ''}`;
       return { status: 'succeeded', summary };
     }
@@ -251,6 +270,21 @@ export class EventProcessor {
       await this.createEntriesForRule(rule, ctx, payload, journalId, eventId);
     }
     return 'logged';
+  }
+
+  /** Tell the operator about new, visible transactions that matched no rule. */
+  private notifyNeedsRule(splits: FireflySplit[], eventId: number): void {
+    const { notifier, db } = this.deps;
+    if (!notifier?.wants('needs-rule') || splits.length === 0) return;
+    // Respect the dashboard filters: hidden transactions are not meals.
+    const visible = splits.filter(visibilityPredicate(loadFilters(db)));
+    if (visible.length === 0) return;
+    void notifier.send({
+      kind: 'needs-rule',
+      title: visible.length === 1 ? 'Sparkfly: transaction needs a rule' : `Sparkfly: ${visible.length} transactions need a rule`,
+      message: visible.map((s) => describeSplit(s)).join('\n'),
+      eventId,
+    });
   }
 
   /**

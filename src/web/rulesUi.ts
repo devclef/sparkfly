@@ -115,7 +115,10 @@ function describeAction(a: ActionSpec): string {
     a.log === 'meal' ? `meal ${esc(a.meal_template_id ?? '?')}` :
     a.log === 'food' ? `food ${esc(a.food_id ?? '?')}` :
     `foods: ${a.foods?.map((f) => esc(f.food_id)).join(', ') ?? ''}`;
-  return `${target} <span class="muted">×${a.quantity} ${esc(a.unit)} · ${esc(a.meal_type)}</span>`;
+  const qty = a.quantity_from_amount && a.log !== 'foods'
+    ? `qty = amount ÷ ${a.quantity_from_amount.per_unit}`
+    : `×${a.quantity}`;
+  return `${target} <span class="muted">${qty} ${esc(a.unit)} · ${esc(a.meal_type)}</span>`;
 }
 
 // ------------------------------------------------------------------ //
@@ -236,7 +239,20 @@ ${!opts.sparkyConfigured ? '<div class="warnbox">SparkyFitness is not configured
     </div>
     <div class="field"><label>Quantity</label><input name="quantity" value="${esc(val(a.quantity) || '1')}" inputmode="decimal"></div>
     <div class="field"><label>Unit</label><input name="unit" value="${esc(val(a.unit) || 'serving')}"></div>
-    <div class="field"><label>Quantity per € (off by default)</label><input name="quantity_from_amount_per_unit" value="${esc(val(a.quantity_from_amount?.per_unit))}" placeholder="e.g. 14.50 → €29 logs 2 servings"></div>
+  </div>
+  <div class="card" id="sec-qty-amount">
+    <label class="muted"><input type="checkbox" id="qty-from-amount" ${a.quantity_from_amount ? 'checked' : ''}> scale the quantity with the amount paid</label>
+    <div class="grid" id="qty-amount-fields" style="margin-top:.6rem;display:${a.quantity_from_amount ? '' : 'none'}">
+      <div class="field"><label for="per-unit">Price of one ${esc(val(a.unit) || 'serving')}</label>
+        <input id="per-unit" name="quantity_from_amount_per_unit" value="${esc(val(a.quantity_from_amount?.per_unit))}" inputmode="decimal" placeholder="14.50">
+        <span class="hint">quantity = amount ÷ price, rounded, at least 1 — replaces the fixed quantity</span>
+      </div>
+      <div class="field"><label for="qty-sample">Try an amount</label>
+        <input id="qty-sample" value="${esc(tx ? String(Math.abs(Number(tx.amount))) : '')}" inputmode="decimal" placeholder="29.00">
+        <span class="hint" id="qty-preview"></span>
+      </div>
+    </div>
+    <span class="hint" id="qty-foods-note" style="display:${a.log === 'foods' ? '' : 'none'}">Not used for "several foods": each item keeps its own quantity.</span>
   </div>
 
   <div id="sec-meal" style="display:${a.log === 'meal' ? '' : 'none'}">
@@ -323,6 +339,25 @@ function toggleSections() {
 }
 logSel.addEventListener('change', toggleSections);
 toggleSections();
+
+// ---- quantity from amount ----
+const qtyToggle = document.getElementById('qty-from-amount');
+const perUnit = document.getElementById('per-unit');
+const sample = document.getElementById('qty-sample');
+const preview = document.getElementById('qty-preview');
+function updateQty() {
+  document.getElementById('qty-amount-fields').style.display = qtyToggle.checked ? '' : 'none';
+  // An unchecked box must not submit a stale price.
+  perUnit.disabled = !qtyToggle.checked;
+  document.getElementById('qty-foods-note').style.display = logSel.value === 'foods' ? '' : 'none';
+  const p = Number(perUnit.value), amt = Math.abs(Number(sample.value));
+  preview.textContent = p > 0 && sample.value !== '' && Number.isFinite(amt)
+    ? amt + ' → ' + Math.max(1, Math.round(amt / p)) + ' × ' + (document.querySelector('[name=unit]').value || 'serving')
+    : '';
+}
+[qtyToggle, perUnit, sample, logSel].forEach((el) => el.addEventListener('input', updateQty));
+qtyToggle.addEventListener('change', updateQty);
+updateQty();
 
 // ---- foods item rows ----
 const tpl = document.getElementById('food-item-template');

@@ -109,6 +109,7 @@ export function renderStatusPage(d: StatusPageData): string {
   const setup = `
 <details class="card" id="setup"${total === 0 ? ' open' : ''}>
   <summary>Setup — paste into Firefly</summary>
+  <p class="muted" style="margin-top:0">With <code>FIREFLY_URL</code> and <code>FIREFLY_PAT</code> set, <a href="/setup">Setup</a> registers the webhook for you and can backfill past transactions.</p>
   <div class="row">
     <div><span>Webhook URL</span><code>${esc(d.webhookUrl)}</code></div>
     <div><span>Triggers</span><code>STORE_TRANSACTION</code> <code>UPDATE_TRANSACTION</code> <code>DESTROY_TRANSACTION</code></div>
@@ -133,7 +134,7 @@ export function renderStatusPage(d: StatusPageData): string {
 <h1>Dashboard <small>Firefly III → SparkyFitness</small></h1>
 <div class="row">${dryRunBadge}</div>
 ${d.adminPasswordSet ? '' : '<div class="warnbox">No <code>ADMIN_PASSWORD</code> is set — anyone who can reach this port can see and change everything here. Put Sparkfly behind your reverse proxy or set the password before exposing it.</div>'}
-${d.webhookSecret ? '' : '<div class="errbox"><code>FIREFLY_WEBHOOK_SECRET</code> is not set — every webhook delivery is rejected.</div>'}
+${d.webhookSecret ? '' : '<div class="errbox">No webhook secret — every delivery is rejected. Set <code>FIREFLY_WEBHOOK_SECRET</code>, or register the webhook from <a href="/setup">Setup</a>.</div>'}
 
 <div class="stats">
   ${stat(d.counts.needsRule, 'need a rule', 'warn', 'needs-rule')}

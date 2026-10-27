@@ -7,7 +7,9 @@ import { EventProcessor } from './core/processEvent.js';
 import { importRulesFileIfFirstTime } from './rules/importFile.js';
 import { RulesRegistry } from './rules/registry.js';
 import { SparkyClient } from './sparky/client.js';
-import { buildApp } from './web/server.js';
+import { FireflyClient } from './firefly/client.js';
+import { Notifier } from './core/notify.js';
+import { buildApp, webhookSecrets } from './web/server.js';
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -28,8 +30,8 @@ async function main(): Promise<void> {
   );
   void imported;
 
-  if (!cfg.fireflyWebhookSecret) {
-    logger.warn('FIREFLY_WEBHOOK_SECRET is not set — every webhook delivery will be rejected with 503');
+  if (webhookSecrets(cfg, db).length === 0) {
+    logger.warn('no webhook secret (FIREFLY_WEBHOOK_SECRET, or register the webhook on /setup) — every delivery will be rejected with 503');
   }
   if (!cfg.adminPassword) {
     logger.warn('ADMIN_PASSWORD is not set — the status page is open; protect it with your reverse proxy');
@@ -45,11 +47,18 @@ async function main(): Promise<void> {
         )
       : null;
 
+  const firefly =
+    cfg.fireflyUrl && cfg.fireflyPat
+      ? new FireflyClient({ baseUrl: cfg.fireflyUrl, pat: cfg.fireflyPat, timeoutMs: cfg.fireflyTimeoutMs, logger: logger.child({ module: 'firefly' }) })
+      : null;
+  const notifier = new Notifier({ cfg, logger: logger.child({ module: 'notify' }) });
+
   const processor = new EventProcessor({
     db,
     cfg,
     sparky,
     registry,
+    notifier,
     logger: logger.child({ module: 'processor' }),
   });
   const queue = new EventQueue({
@@ -65,7 +74,7 @@ async function main(): Promise<void> {
     logger.info({ requeued: requeued.length }, 're-queued events from a previous run');
   }
 
-  const app = buildApp({ cfg, db, queue, processor, registry, sparky, importedFrom: registry.importedFrom });
+  const app = buildApp({ cfg, db, queue, processor, registry, sparky, importedFrom: registry.importedFrom, firefly, notifier });
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

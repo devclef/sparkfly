@@ -6,7 +6,7 @@ Point a Firefly III webhook at Sparkfly, define rules ("expense account = Indian
 
 > "Lunch at Indian Garden, €14.50" in Firefly → "Chicken Tikka Masala, 1 serving, Lunch" in SparkyFitness.
 
-Design: [docs/DESIGN.md](docs/DESIGN.md) · Latest release: **[v0.1.0](https://github.com/devclef/sparkfly/releases/tag/v0.1.0)** ([changelog](CHANGELOG.md)) · Milestones 1–3 complete — see [milestones](#milestones).
+Design: [docs/DESIGN.md](docs/DESIGN.md) · Latest release: **[v0.2.0](https://github.com/devclef/sparkfly/releases/tag/v0.2.0)** ([changelog](CHANGELOG.md)) · All four milestones complete — see [milestones](#milestones).
 
 ## How it works
 
@@ -29,21 +29,21 @@ Firefly III ──POST /hooks/firefly──▶ Sparkfly ──REST──▶ Spar
 
 ```sh
 cp config/rules.example.yaml config/rules.yaml   # then edit: paste real SparkyFitness UUIDs
-nano .env          # FIREFLY_WEBHOOK_SECRET, SPARKY_URL, SPARKY_API_KEY
+nano .env          # SPARKY_URL, SPARKY_API_KEY + FIREFLY_URL, FIREFLY_PAT (or FIREFLY_WEBHOOK_SECRET)
 docker compose up -d --build
 ```
 
 Then:
 
 1. In Firefly III: *Administration → Configuration* → allow webhooks (admin).
-2. *Automation → Webhooks* → new: URL `http://<sparkfly-host>:8080/hooks/firefly`, triggers `STORE_TRANSACTION` + `UPDATE_TRANSACTION` + `DESTROY_TRANSACTION`, response `TRANSACTIONS`, delivery `JSON`, paste the secret shown in Firefly into your `.env` (or read it back from Sparkfly's setup page).
+2. With `FIREFLY_URL` + `FIREFLY_PAT` set, open Sparkfly's **Setup** page (`/setup`) and press *register webhook in Firefly* — Sparkfly creates the webhook and stores the signing secret itself. Otherwise, by hand: *Automation → Webhooks* → new: URL `http://<sparkfly-host>:8080/hooks/firefly`, triggers `STORE_TRANSACTION` + `UPDATE_TRANSACTION` + `DESTROY_TRANSACTION`, response `TRANSACTIONS`, delivery `JSON`, paste the secret shown in Firefly into your `.env` (or read it back from Sparkfly's setup page).
 3. Watch it work: open `http://<sparkfly-host>:8080/` — setup details, your rules, and every webhook delivery with its transaction date, description, amount, destination, budget, category, matched rule (or a **needs rule** flag) and outcome. `GET /health` for monitoring.
 
 Prefer to try it without Firefly/Sparky? `DRY_RUN=true` starts the app and evaluates all rules without writing to SparkyFitness.
 
 ### Prebuilt image
 
-Every release publishes `ghcr.io/devclef/sparkfly:<version>` (and `:<major>.<minor>`); every push to `main` publishes `:latest`. To use it instead of building locally, replace `build: .` in `docker-compose.yml` with `image: ghcr.io/devclef/sparkfly:0.1.0`.
+Every release publishes `ghcr.io/devclef/sparkfly:<version>` (and `:<major>.<minor>`); every push to `main` publishes `:latest`. To use it instead of building locally, replace `build: .` in `docker-compose.yml` with `image: ghcr.io/devclef/sparkfly:0.2.0`.
 
 ## Releasing
 
@@ -79,7 +79,7 @@ curl -s -X POST localhost:8080/hooks/firefly \
   -H 'Content-Type: application/json' -H "Signature: t=$T,v1=$V1" -d "$BODY"
 ```
 
-Tests: `npm test` (131 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes, rule editor UI, SparkyFitness lookups, dry-run event pages, webhook filters).
+Tests: `npm test` (153 cases: signature scheme, rule matching, meal-type windows, templating, lifecycle updates/deletes, retry/backoff, idempotency, webhook + status routes, rule editor UI, SparkyFitness lookups, dry-run event pages, webhook filters, Firefly API client, webhook registration, backfill, notifications).
 
 ## Rules
 
@@ -107,10 +107,20 @@ rules:
       # quantity_from_amount: { per_unit: 14.50 }
 ```
 
+- **Quantity from the amount**: tick *scale the quantity with the amount paid* in the editor and give the price of one unit; quantity = amount ÷ price, rounded, at least 1 (so €29 at €14.50 logs 2 servings). The editor previews the result for any amount — pre-filled with the transaction's when you start from one. Off by default; not used by `foods` rules, whose items keep their own quantities.
+
 - `meal_type: auto` maps the local time to breakfast/lunch/snacks/dinner via `defaults.meal_type_auto` (the dinner window wraps midnight, so 00:00 → dinner).
 - A transaction tagged `no-sparky` (configurable in `defaults.global_skip_tag`) is skipped entirely.
 - `entry_date` / `entry_time` come from the Firefly date converted to `TZ`; a `00:00` time (no time entered in Firefly) omits `entry_time`.
 - `foods` actions log each item as its own entry (upsert key = `<journal id>:<index>`).
+
+## Setup page: webhook registration, backfill, notifications
+
+`/setup` needs `FIREFLY_URL` and a Firefly **Personal Access Token** in `FIREFLY_PAT` (*Options → Profile → OAuth → Personal access tokens*) for the first two sections.
+
+- **Webhook registration** lists the webhooks Firefly has and registers one for Sparkfly (triggers `STORE`/`UPDATE`/`DESTROY_TRANSACTION`, response `TRANSACTIONS`, delivery `JSON`). The URL defaults to `SPARKFLY_PUBLIC_URL` + the webhook path, falling back to the host you opened the page with — make sure Firefly can reach it (e.g. `http://sparkfly:8080` on a shared Docker network). The secret Firefly generates is stored in the database and accepted next to `FIREFLY_WEBHOOK_SECRET`, so the env var becomes optional. Older Firefly versions take one trigger per webhook; the page flags missing triggers.
+- **Backfill** runs the current rules over past transactions from the Firefly API. *Preview* shows what would be logged without writing anything; *log N transactions* then queues each matching transaction group as a `STORE_TRANSACTION` event with uuid `backfill-<group id>`, so it goes through the normal queue, retries, links and activity log. Groups that match no rule are not stored, groups with a split that is already linked are skipped, and re-running a range is a no-op. One run scans up to 5,000 transactions; split longer histories into several ranges.
+- **Failure notifications** go to `NOTIFY_URL` when an event is marked `dead` (and, with `NOTIFY_ON=dead,needs-rule`, when a new transaction the dashboard shows matches no rule). `NOTIFY_FORMAT=json` (default) posts `{ app, kind, title, message, event_id, url, text, content }` — `text`/`content` make Slack, Mattermost and Discord webhooks work as-is; `NOTIFY_FORMAT=ntfy` posts plain text with ntfy's `Title`/`Priority`/`Click` headers. Set `SPARKFLY_PUBLIC_URL` to get links to the event page. The page has a *send a test notification* button.
 
 ## Webhook filters
 
@@ -125,13 +135,18 @@ All fields filled in on one filter must match. Patterns use the rule syntax: exa
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `FIREFLY_WEBHOOK_SECRET` | yes | — | Shown by Firefly when creating the webhook |
+| `FIREFLY_WEBHOOK_SECRET` | yes† | — | Shown by Firefly when creating the webhook |
 | `SPARKY_URL` | yes* | — | e.g. `http://sparkyfitness-server:3010` |
 | `SPARKY_API_KEY` | yes* | — | **Write-enabled** key (read-only keys are refused) |
 | `TZ` | no | system | IANA zone for meal-type auto + entry date/time |
 | `DRY_RUN` | no | `false` | * | 
 | `ADMIN_PASSWORD` | no | — | Basic-auth for the status page (or use your reverse proxy) |
-| `FIREFLY_URL`, `FIREFLY_PAT` | no | — | Reserved for milestone 4 (auto-register webhook, backfill) |
+| `FIREFLY_URL`, `FIREFLY_PAT` | no | — | Firefly API access for webhook registration and backfill (`/setup`) |
+| `FIREFLY_TIMEOUT_MS` | no | `30000` | Firefly API request timeout |
+| `SPARKFLY_PUBLIC_URL` | no | request host | How Firefly reaches Sparkfly (registration default) and the base of links in notifications |
+| `NOTIFY_URL` | no | — | Failure notifications target (Slack/Discord/Mattermost webhook, ntfy topic, any JSON endpoint) |
+| `NOTIFY_FORMAT` | no | `json` | `json` or `ntfy` |
+| `NOTIFY_ON` | no | `dead` | Comma list of `dead`, `needs-rule` |
 | `HOST` / `PORT` | no | `0.0.0.0` / `8080` | Listen address |
 | `SPARKFLY_DATA_DIR` | no | `./data` (container: `/data`) | SQLite database location |
 | `RULES_FILE` | no | `./config/rules.yaml` (container: `/config/rules.yaml`) | One-time first-start import into the DB (missing = no rules) |
@@ -141,11 +156,11 @@ All fields filled in on one filter must match. Patterns use the rule syntax: exa
 | `SPARKFLY_RETRY_BASE_MS` / `SPARKFLY_RETRY_MAX_MS` | no | `5000` / `600000` | Exponential backoff bounds |
 | `FIREFLY_SIGNATURE_TTL` | no | `300` | Allowed skew of the webhook timestamp (s) |
 
-\* not required when `DRY_RUN=true`.
+\* not required when `DRY_RUN=true`. † not required once the webhook was registered from `/setup`.
 
 ## Milestones
 
 - [x] **1 — MVP**: webhook endpoint, HMAC-SHA3-256 signature check, YAML rules, saved-meal + single-food (+`foods`) logging, `STORE_TRANSACTION`, SQLite event/link/activity log, Docker image, status page, dry run.
 - [x] **2 — Lifecycle**: `UPDATE_TRANSACTION` (re-match → update / replace / delete) and `DESTROY_TRANSACTION` (delete linked entry) through the link table, plus a retry button for `dead` events on the status page. Meals are updated via `PUT` (re-created if the entry vanished on the SparkyFitness side); food entries ride the `(source, source_id)` upsert key.
 - [x] **3 — UI**: rules moved to SQLite and managed in the web UI — list/reorder/edit/delete, SparkyFitness search typeaheads (meals, foods + variants, meal types), "new rule from this transaction" prefill, per-event page with a live dry-run plan (nothing is written) and the activity log, plus a JSON rule API. The YAML file is a one-time first-start import only.
-- [ ] **4 — Extras**: backfill from the Firefly API, webhook auto-registration, amount-based quantity in the UI, failure notifications.
+- [x] **4 — Extras**: backfill from the Firefly API with a preview, webhook auto-registration (the generated secret is stored and accepted), amount-based quantity in the rule editor with a live preview, and failure notifications (`dead` events, optionally new transactions that need a rule) as JSON or ntfy.
